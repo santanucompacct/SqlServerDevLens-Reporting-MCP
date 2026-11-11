@@ -37,13 +37,16 @@ def test_private_admin_workflow(tmp_path):
             page.locator("#token").fill(admin_token)
             page.locator("#load").click()
             page.wait_for_function("document.querySelector('#status').textContent === 'Loaded synthetic demo configuration'")
+            assert page.locator("#encrypt").is_checked()
+            assert not page.locator("#trust_server_certificate").is_checked()
+            page.locator("#trust_server_certificate").check()
             page.locator("#sql_password").fill("Synthetic password#;{}-123!")
             page.locator("#save_password").click()
             page.wait_for_function("document.querySelector('#status').textContent === 'SQL password saved. Test the connection next.'")
             assert page.locator("#sql_password").input_value() == ""
             assert (tmp_path / "sql-password").read_text() == "Synthetic password#;{}-123!"
             page.locator("#inspect").click()
-            page.wait_for_function("document.querySelector('#status').textContent === 'Connection verified'")
+            page.wait_for_function("document.querySelector('#status').textContent === 'Demo metadata loaded (synthetic data)'")
             page.locator("#preview").click()
             page.wait_for_function("document.querySelector('#results').textContent.includes('Example A')")
             page.locator("#new_user").fill("browser_participant")
@@ -54,6 +57,12 @@ def test_private_admin_workflow(tmp_path):
             page.wait_for_function("document.querySelector('#status').textContent === 'Configuration published'")
             assert not errors
             assert 'browser_participant' in state.read_text()
+            saved = httpx.get(url + "/admin/api/state", headers={"Authorization": "Bearer " + admin_token}).json()
+            assert saved["state"]["connection"]["encrypt"] is True
+            assert saved["state"]["connection"]["trust_server_certificate"] is True
+            page.locator("#load").click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Loaded synthetic demo configuration'")
+            assert page.locator("#trust_server_certificate").is_checked()
             browser.close()
     finally:
         process.terminate()
