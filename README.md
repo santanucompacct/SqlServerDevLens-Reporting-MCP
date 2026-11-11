@@ -2,7 +2,7 @@
 
 An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI clients discover approved datasets, read their business dictionary, and request bounded, parameterized SELECT queries. A private administration webpage manages the connection, published catalog and participant grants.
 
-**Version 0.1.3 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
+**Version 0.1.4 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
 
 ## Included in this version
 
@@ -80,7 +80,7 @@ The process reads its published state manifest on each request. On publication, 
 python -m pytest -q
 ```
 
-Ordinary tests use synthetic SQLite data while compiling SQL Server queries. CI exercises the real admin webpage in Chromium and also provisions a disposable SQL Server, installs Driver 18, and verifies real SELECT execution, exact decimal serialization and write denial under a restricted login. The integration test verifies rejection of the disposable SQL Server's self-signed certificate under default settings, then tests explicit certificate trust and optional encryption using the actual driver. Connection-test failures are categorized as TLS, login, database access, timeout, network or metadata errors without returning raw provider messages or credentials. To run that integration test locally, set `TEST_SQL_SERVER=localhost,1433` and `TEST_SQL_SA_PASSWORD` for a fresh disposable SQL Server, then run `python -m pytest tests/test_sqlserver.py -q`. The fixture creates its own database and SQL login.
+Ordinary tests use synthetic SQLite data while compiling SQL Server queries. CI exercises the real admin webpage in Chromium and also provisions a disposable SQL Server, installs Driver 18, and verifies real SELECT execution, exact decimal serialization and write denial under a restricted login. The integration test verifies rejection of the disposable SQL Server's self-signed certificate under default settings, then tests explicit certificate trust and optional encryption using the actual driver. Connection-test failures are categorized as TLS, login, database access, timeout, network or metadata errors with password-redacted provider details available only in the private administrator connection test. The password used for the failed operation and configured connection identity fields are removed before the diagnostic is returned. To run that integration test locally, set `TEST_SQL_SERVER=localhost,1433` and `TEST_SQL_SA_PASSWORD` for a fresh disposable SQL Server, then run `python -m pytest tests/test_sqlserver.py -q`. The fixture creates its own database and SQL login.
 
 CI builds wheel and source archives as downloadable workflow artifacts. These builds are pilot packages. Customer database reconciliation and real ChatGPT/Gemini onboarding remain deployment acceptance checks.
 
