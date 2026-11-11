@@ -204,13 +204,15 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
     state.write_text(json.dumps(value))
     admin_token = 'synthetic-browser-oauth-admin-123456789012345'
     issuer = local = 'https://localhost:8131'
-    redirect = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    # Different HTTPS origin, real redirect; never navigate to a real account.
+    redirect = 'https://127.0.0.1:8131/test-oauth-callback'
     key, cert = tmp_path / 'tls.key', tmp_path / 'tls.crt'
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
                     '-keyout', str(key), '-out', str(cert), '-subj', '/CN=localhost'],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     environment = {**os.environ, 'DEVLENS_STATE': str(state), 'DEVLENS_DEMO': '1', 'DEVLENS_PORT': '8131',
                    'DEVLENS_ADMIN_TOKEN': admin_token, 'DEVLENS_OAUTH_ISSUER': issuer,
+                   'DEVLENS_OAUTH_REDIRECT_HOSTS': '127.0.0.1',
                    'DEVLENS_ALLOWED_HOSTS': 'reporting.test,localhost,127.0.0.1:*'}
     process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'devlens_reporting.app:create_app', '--factory',
                                 '--host', '127.0.0.1', '--port', '8131', '--ssl-keyfile', str(key), '--ssl-certfile', str(cert)],
@@ -234,21 +236,8 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                 browser = driver.chromium.launch(executable_path=os.environ.get('DEVLENS_CHROMIUM'))
                 context = browser.new_context(ignore_https_errors=True)
                 page = context.new_page()
-                errors, callbacks = [], []
+                errors = []
                 page.on('pageerror', lambda error: errors.append(str(error)))
-                def consent(route):
-                    if route.request.method != 'POST':
-                        route.continue_()
-                        return
-                    response = route.fetch(max_redirects=0)
-                    assert response.status in (200, 302), {'status': response.status, 'body': response.text(), 'origin': route.request.headers.get('origin'), 'cookie_present': bool(route.request.headers.get('cookie'))}
-                    location = response.headers.get('location', '')
-                    if response.status == 302 and location.startswith(redirect + '?'):
-                        callbacks.append(location)
-                        route.fulfill(status=200, content_type='text/html', body='<p>OAuth callback received</p>')
-                    else:
-                        route.fulfill(response=response)
-                page.route(issuer + '/oauth/consent**', consent)
                 page.goto(issuer + '/authorize?' + urlencode(params))
                 other_tab = page.context.new_page()
                 other_tab.goto(issuer + '/authorize?' + urlencode(params))
@@ -264,8 +253,8 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                 page.set_viewport_size({'width': 390, 'height': 844})
                 assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
                 page.get_by_role('button', name='Allow read-only reporting access').click()
-                page.get_by_text('OAuth callback received', exact=True).wait_for()
-                callback_params = parse_qs(urlsplit(callbacks[-1]).query)
+                page.wait_for_url(redirect + '**')
+                callback_params = parse_qs(urlsplit(page.url).query)
                 assert callback_params['iss'] == [issuer] and callback_params['state'] == ['browser-state']
                 tokens = api.post('/token', data={'grant_type': 'authorization_code', 'client_id': registration['client_id'],
                     'redirect_uri': redirect, 'code_verifier': verifier, 'code': callback_params['code'][0], 'resource': issuer + '/mcp'}).json()

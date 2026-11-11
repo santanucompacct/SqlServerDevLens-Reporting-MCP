@@ -365,9 +365,13 @@ class OAuthProvider:
                     "<button name='action' value='deny' formnovalidate>Deny</button></form>"
                     "<p><small>Access tokens expire after one hour. A refresh grant lasts at most 30 days and can be revoked by your administrator."
                     " Your participant token is not passed to the connecting application.</small></p></main></body></html>")
+        # Chrome applies form-action to redirects after form submission too.
+        # Permit only self and this request's already validated callback origin.
+        callback = urlsplit(str(params.redirect_uri))
+        callback_origin = callback.scheme + "://" + callback.netloc
         response = HTMLResponse(document, status_code=status, headers={
             "Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "same-origin",
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' " + callback_origin + "; frame-ancestors 'none'; base-uri 'none'",
             "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
         response.set_cookie(self.cookie_name(request_id), csrf, secure=True, httponly=True, samesite="lax", max_age=600, path="/")
         return response

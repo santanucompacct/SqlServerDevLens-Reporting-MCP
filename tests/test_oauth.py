@@ -82,6 +82,7 @@ def authorize(client, registration):
     assert any(key.startswith(COOKIE + "-") for key in page.cookies)
     assert 'Secure' in page.headers['set-cookie'] and 'HttpOnly' in page.headers['set-cookie']
     assert page.headers['referrer-policy'] == 'same-origin'
+    assert "form-action 'self' https://chatgpt.com;" in page.headers['content-security-policy']
     page = login(client, page)
     assert page.status_code == 200, page.text
     assert 'tester' in page.text and '<li>sales</li>' in page.text
