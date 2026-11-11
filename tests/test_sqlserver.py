@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 
 import pytest
-from devlens_reporting.database import Database
+from devlens_reporting.database import Database, RedactedDatabaseError
 from devlens_reporting.models import Catalog, Connection, Query
 from devlens_reporting.query import compile_query
 
@@ -50,7 +50,7 @@ def test_real_read_only_sql(monkeypatch):
             {"name": "customer", "description": "customer", "kind": "text"},
             {"name": "amount", "description": "amount", "kind": "number"}]}]})
     database = Database()
-    with pytest.raises(pyodbc.Error):
+    with pytest.raises(RedactedDatabaseError):
         database.validate(settings.model_copy(update={"trust_server_certificate": False}), catalog)
     database.validate(settings, catalog)
     database.validate(settings.model_copy(update={"encrypt": False}), Catalog(version="optional-tls"))
@@ -63,3 +63,9 @@ def test_real_read_only_sql(monkeypatch):
     with database.connect(settings) as reader:
         with pytest.raises(pyodbc.Error):
             reader.execute("INSERT dbo.Sales VALUES ('forbidden',1)")
+
+    with pytest.raises(RedactedDatabaseError) as diagnostic:
+        with database.connect(settings) as reader:
+            reader.execute("RAISERROR ('Synthetic provider failure', 16, 1)")
+    assert "Synthetic provider failure" in diagnostic.value.safe_provider_detail
+    assert reader_password not in diagnostic.value.safe_provider_detail
