@@ -29,7 +29,7 @@ def test_real_read_only_sql(monkeypatch):
         except pyodbc.Error:
             time.sleep(2)
     assert connection is not None, "Disposable SQL Server failed to start"
-    reader_password = "Synthetic-Reader-Password-123!"
+    reader_password = "Synthetic Reader#;{}-Password-123!a"
     try:
         connection.execute("CREATE DATABASE DevLensTest")
         connection.execute("USE DevLensTest")
