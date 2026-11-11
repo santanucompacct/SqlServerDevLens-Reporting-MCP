@@ -67,6 +67,8 @@ class Connection(Model):
     database: str = Field(default="", max_length=128)
     username: str = Field(default="", max_length=128)
     password_env: Name = "DEVLENS_SQL_PASSWORD"
+    encrypt: bool = True
+    trust_server_certificate: bool = False
 
 
 class Participant(Model):
