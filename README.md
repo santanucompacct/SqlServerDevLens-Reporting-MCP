@@ -2,7 +2,7 @@
 
 An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI clients discover approved datasets, read their business dictionary, and request bounded, parameterized SELECT queries. A private administration webpage manages the connection, published catalog and participant grants.
 
-**Version 0.1.5 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
+**Version 0.2.0 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
 
 ## Included in this version
 
@@ -97,3 +97,17 @@ CI builds wheel and source archives as downloadable workflow artifacts. These bu
 Use synthetic examples in public issues and contributions. Customer catalogs, instance settings and test evidence belong in private deployment records. See [LICENSE](LICENSE).
 
 SQL operations explicitly consume validation results and close cursors before closing connections, including truncated queries and errors. Reporting connections disable ODBC pooling to avoid reusing handles with pending results.
+
+
+## Guided SQL setup and field remarks (0.2.0)
+
+Open the private administration page through the instance's SSH tunnel.
+
+1. Click **Load published configuration** with the administrator token. Saved setup settings are loaded automatically, falling back to the published connection on older installations.
+2. Enter the SQL host, port, database, login and TLS options. Click **Save SQL details** (or **Update SQL details** after the first save). Save or replace the password separately with **Save SQL credentials**. Passwords are never returned to the page.
+3. Click **Test SQL and List object** and select a visible table or view from the dropdown. The help section generates an example object-level SELECT grant for a database administrator to run.
+4. Review **Name**, **SQL type**, **Nullable** and editable **Remarks**. Click **Save field remarks**. Selecting the same object again reloads its saved remarks alongside current SQL metadata.
+
+Private setup drafts are stored atomically in `setup.json` alongside the instance state with owner-only file permissions. No additional database service is required. Remarks are scoped to server, port, database, SQL username, schema and object. Schema refresh preserves remarks for existing column names and leaves new columns blank. A revision check rejects conflicting saves from another administrator. The SQL password remains in the separate protected `sql-password` file.
+
+Saving SQL details or field remarks does not change participant datasets or grants. The advanced dataset publishing and participant controls remain available below the setup workflow. A later publish activates the connection and catalog currently entered in those controls. Saving a password continues to replace the active instance password immediately.

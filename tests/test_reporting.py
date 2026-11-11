@@ -375,3 +375,56 @@ def test_database_closes_pending_results(monkeypatch):
             return cursor
         monkeypatch.setattr(ConnectionStub, "cursor", binary_cursor)
         database.execute(settings, "SELECT value FROM dbo.Sales", [], 1)
+
+
+def test_saved_setup_and_field_remarks_are_private_and_persistent(client, state, monkeypatch):
+    from devlens_reporting.database import Database
+    original = client.get('/admin/api/state', headers=headers()).json()
+    connection = {**original['setup']['connection'], 'server': 'synthetic-sql',
+                  'database': 'synthetic-db', 'username': 'report-reader'}
+    saved = client.post('/admin/api/connection', headers=headers(), json={
+        'revision': original['setup']['revision'], 'connection': connection})
+    assert saved.status_code == 200
+    loaded = client.get('/admin/api/state', headers=headers()).json()
+    assert loaded['setup']['connection'] == connection
+    assert loaded['state'] == original['state']  # Draft does not change active grants or catalog.
+    assert loaded['revision'] == original['revision']
+    assert client.post('/admin/api/connection', headers=headers(), json={
+        'revision': original['setup']['revision'], 'connection': connection}).status_code == 409
+    body = {'connection': connection, 'schema_name': 'dbo', 'object_name': 'Sales'}
+    inspected = client.post('/admin/api/object', headers=headers(), json=body).json()
+    assert all(c['remarks'] == '' for c in inspected['columns'])
+    columns = [{'name': c['name'], 'remarks': '<script>business meaning</script>' if c['name'] == 'amount' else ''}
+               for c in inspected['columns']]
+    result = client.post('/admin/api/object/save', headers=headers(), json={
+        **body, 'revision': inspected['revision'], 'columns': columns})
+    assert result.status_code == 200
+    with TestClient(create_app(str(state), demo=True), base_url='http://localhost') as restarted:
+        assert restarted.get('/admin/api/state').status_code == 401
+        reloaded = restarted.post('/admin/api/object', headers=headers(), json=body).json()
+        assert next(c for c in reloaded['columns'] if c['name'] == 'amount')['remarks'] == '<script>business meaning</script>'
+        settings = restarted.get('/admin/api/state', headers=headers()).json()
+        assert settings['setup']['objects'] == [{'schema': 'dbo', 'object': 'Sales', 'type': 'saved'}]
+        assert settings['setup']['connection'] == connection
+    for changed in [{'database': 'other-db'}, {'username': 'other-reader'}, {'server': 'other-host'}]:
+        isolated = client.post('/admin/api/object', headers=headers(), json={**body, 'connection': {**connection, **changed}}).json()
+        assert all(c['remarks'] == '' for c in isolated['columns'])
+    stale = client.post('/admin/api/object/save', headers=headers(), json={
+        **body, 'revision': inspected['revision'], 'columns': columns})
+    assert stale.status_code == 409
+    monkeypatch.setattr(Database, 'columns', lambda *args: [{'name': 'new_column', 'sql_type': 'int', 'nullable': False}])
+    changed = client.post('/admin/api/object/save', headers=headers(), json={
+        **body, 'revision': result.json()['revision'], 'columns': columns})
+    assert changed.status_code == 409
+    assert 'columns changed' in changed.text
+    assert (state.parent / 'setup.json').stat().st_mode & 0o077 == 0
+    assert 'password' not in (state.parent / 'setup.json').read_text().replace('password_env', '')
+
+
+def test_setup_requires_admin_and_valid_fields(client):
+    initial = client.get('/admin/api/state', headers=headers()).json()
+    for path in ['connection', 'object', 'object/save']:
+        assert client.post('/admin/api/' + path, json={}).status_code == 401
+    assert client.post('/admin/api/connection', headers=headers(), json={
+        'connection': {}, 'revision': initial['setup']['revision']}).status_code == 400
+    assert client.post('/admin/api/object', headers=headers(), json={'connection': {}}).status_code == 400

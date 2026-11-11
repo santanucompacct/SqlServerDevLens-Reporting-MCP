@@ -10,13 +10,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 from .limits import RequestSizeLimit
 from .database import Database, connection_error_message
 from .models import Catalog, Connection, Model, Name, Participant, Query, State
 from .query import compile_query
 from .storage import Store, atomic_write
+from .setup import SetupStore
 
 log = logging.getLogger("devlens_reporting")
 
@@ -36,9 +37,28 @@ class Inspect(Model):
     object_name: Name | None = None
 
 
+class ConnectionSave(Model):
+    revision: str
+    connection: Connection
+
+
+class FieldRemark(Model):
+    name: str = Field(min_length=1, max_length=128)
+    remarks: str = Field(default="", max_length=2000)
+
+
+class ObjectSave(Model):
+    revision: str
+    connection: Connection
+    schema_name: Name
+    object_name: Name
+    columns: list[FieldRemark] = Field(max_length=1024)
+
+
 def create_app(state_path: str | None = None, demo: bool | None = None) -> FastAPI:
     store = Store(Path(state_path or os.environ.get("DEVLENS_STATE", "state/instance.json")))
     password_path = store.path.parent / "sql-password"
+    setup = SetupStore(store.path.parent / "setup.json")
     database = Database(demo if demo is not None else os.environ.get("DEVLENS_DEMO") == "1",
                         password_path=password_path)
     admin_token = os.environ.get("DEVLENS_ADMIN_TOKEN", "")
@@ -157,7 +177,51 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
     @app.get("/admin/api/state")
     def get_state():
         state, revision = store.read()
-        return {"state": state.model_dump(), "revision": revision, "demo": database.demo}
+        return {"state": state.model_dump(), "revision": revision, "demo": database.demo,
+                "setup": setup.configuration(state.connection),
+                "password_saved": password_path.exists() or bool(os.environ.get(state.connection.password_env))}
+
+    @app.post("/admin/api/connection")
+    def save_connection(body: ConnectionSave):
+        if not all((body.connection.server.strip(), body.connection.database.strip(), body.connection.username.strip())):
+            raise HTTPException(400, "Enter the SQL server, database and username before saving")
+        try:
+            revision = setup.save_connection(body.connection, body.revision)
+            return {"status": "saved", "revision": revision}
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+
+    @app.post("/admin/api/object")
+    async def inspect_object(body: Inspect):
+        if not body.schema_name or not body.object_name:
+            raise HTTPException(400, "Select an object first")
+        try:
+            current = await run_in_threadpool(database.columns, body.connection, body.schema_name, body.object_name)
+            if not current:
+                raise HTTPException(400, "No visible columns. Verify the object and SELECT permission, then test SQL again.")
+            columns, revision = setup.columns(body.connection, body.schema_name, body.object_name, current)
+            return {"columns": columns, "revision": revision, "demo": database.demo}
+        except HTTPException:
+            raise
+        except Exception as error:
+            raise HTTPException(400, connection_error_message(error, "metadata")) from None
+
+    @app.post("/admin/api/object/save")
+    async def save_object(body: ObjectSave):
+        try:
+            current = await run_in_threadpool(database.columns, body.connection, body.schema_name, body.object_name)
+        except Exception as error:
+            raise HTTPException(400, connection_error_message(error, "metadata")) from None
+        remarks = {column.name: column.remarks for column in body.columns}
+        if (not current or len(remarks) != len(body.columns)
+                or set(remarks) != {column["name"] for column in current}):
+            raise HTTPException(409, "Object columns changed; select the object again before saving remarks")
+        columns = [{**column, "remarks": remarks[column["name"]]} for column in current]
+        try:
+            revision = setup.save_object(body.connection, body.schema_name, body.object_name, columns, body.revision)
+            return {"status": "saved", "revision": revision, "columns": columns}
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
 
     @app.post("/admin/api/password")
     def save_password(body: PasswordUpdate):
