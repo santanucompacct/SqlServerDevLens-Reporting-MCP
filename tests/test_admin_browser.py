@@ -232,6 +232,16 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                     if urlsplit(route.request.url).query:
                         upstream += '?' + urlsplit(route.request.url).query
                     response = route.fetch(url=upstream, max_redirects=0)
+                    # Redirected requests bypass Playwright route interception.
+                    # Resolve internal redirects explicitly while preserving the
+                    # browser's HTTPS origin and Secure-cookie behavior.
+                    location = response.headers.get('location', '')
+                    if response.status in (302, 303) and location.startswith(issuer + '/'):
+                        response = route.fetch(url=local + location[len(issuer):], method='GET', post_data=None, max_redirects=0)
+                    elif response.status in (302, 303) and location.startswith(redirect + '?'):
+                        callbacks.append(location)
+                        route.fulfill(status=200, content_type='text/html', body='<p>OAuth callback received</p>')
+                        return
                     route.fulfill(response=response)
                 page.route(issuer + '/**', proxy)
                 def callback(route):
@@ -249,7 +259,7 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                 page.set_viewport_size({'width': 390, 'height': 844})
                 assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
                 page.get_by_role('button', name='Allow read-only reporting access').click()
-                page.wait_for_url(redirect + '**')
+                page.get_by_text('OAuth callback received', exact=True).wait_for()
                 callback_params = parse_qs(urlsplit(callbacks[-1]).query)
                 assert callback_params['iss'] == [issuer] and callback_params['state'] == ['browser-state']
                 tokens = api.post('/token', data={'grant_type': 'authorization_code', 'client_id': registration['client_id'],
