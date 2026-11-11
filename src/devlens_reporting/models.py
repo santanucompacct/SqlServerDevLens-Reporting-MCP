@@ -76,7 +76,7 @@ class Participant(Model):
 
 
 class State(Model):
-    instance: Name
+    instance: Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,127}$")]
     connection: Connection = Field(default_factory=Connection)
     catalog: Catalog = Field(default_factory=lambda: Catalog(version="unpublished"))
     participants: list[Participant] = Field(default_factory=list, max_length=100)
