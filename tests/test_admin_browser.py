@@ -232,7 +232,8 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                       'state': 'browser-state', 'resource': issuer + '/mcp'}
             with sync_playwright() as driver:
                 browser = driver.chromium.launch(executable_path=os.environ.get('DEVLENS_CHROMIUM'))
-                page = browser.new_page(ignore_https_errors=True)
+                context = browser.new_context(ignore_https_errors=True)
+                page = context.new_page()
                 errors, callbacks = [], []
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 def consent(route):
