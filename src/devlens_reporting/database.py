@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from .models import Connection, Catalog
 
 
@@ -13,8 +14,9 @@ def odbc_value(value: str) -> str:
 
 
 class Database:
-    def __init__(self, demo: bool = False):
+    def __init__(self, demo: bool = False, password_path: Path | None = None):
         self.demo = demo
+        self.password_path = password_path
 
     @contextmanager
     def connect(self, settings: Connection):
@@ -30,9 +32,12 @@ class Database:
             """)
         else:
             import pyodbc
-            password = os.environ.get(settings.password_env)
+            if self.password_path is not None and self.password_path.exists():
+                password = self.password_path.read_bytes().decode("utf-8")
+            else:
+                password = os.environ.get(settings.password_env)
             if not all((settings.server, settings.database, settings.username, password)):
-                raise ValueError("SQL settings or password environment variable are missing")
+                raise ValueError("SQL settings or saved password are missing")
             server = f"tcp:{settings.server},{settings.port}"
             connection = pyodbc.connect(
                 "DRIVER={ODBC Driver 18 for SQL Server};"
