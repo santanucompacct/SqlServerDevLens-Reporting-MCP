@@ -10,13 +10,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import ValidationError
+from pydantic import SecretStr
 from starlette.concurrency import run_in_threadpool
 from .limits import RequestSizeLimit
 from .database import Database
 from .models import Catalog, Connection, Model, Name, Participant, Query, State
 from .query import compile_query
-from .storage import Store
+from .storage import Store, atomic_write
 
 log = logging.getLogger("devlens_reporting")
 
@@ -24,6 +24,10 @@ log = logging.getLogger("devlens_reporting")
 class Publish(Model):
     revision: str
     state: State
+
+
+class PasswordUpdate(Model):
+    password: SecretStr
 
 
 class Inspect(Model):
@@ -34,7 +38,9 @@ class Inspect(Model):
 
 def create_app(state_path: str | None = None, demo: bool | None = None) -> FastAPI:
     store = Store(Path(state_path or os.environ.get("DEVLENS_STATE", "state/instance.json")))
-    database = Database(demo if demo is not None else os.environ.get("DEVLENS_DEMO") == "1")
+    password_path = store.path.parent / "sql-password"
+    database = Database(demo if demo is not None else os.environ.get("DEVLENS_DEMO") == "1",
+                        password_path=password_path)
     admin_token = os.environ.get("DEVLENS_ADMIN_TOKEN", "")
     if len(admin_token) < 32:
         raise ValueError("DEVLENS_ADMIN_TOKEN must contain at least 32 characters")
@@ -152,6 +158,17 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
     def get_state():
         state, revision = store.read()
         return {"state": state.model_dump(), "revision": revision, "demo": database.demo}
+
+    @app.post("/admin/api/password")
+    def save_password(body: PasswordUpdate):
+        value = body.password.get_secret_value()
+        if not value or "\x00" in value:
+            raise HTTPException(400, "Enter a nonempty SQL password without null characters")
+        try:
+            atomic_write(password_path, value.encode("utf-8"))
+        except OSError:
+            raise HTTPException(500, "The SQL password could not be saved") from None
+        return {"status": "saved"}
 
     @app.post("/admin/api/test")
     async def test_connection(body: Inspect):
