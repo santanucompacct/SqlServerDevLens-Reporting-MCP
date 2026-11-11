@@ -18,6 +18,7 @@ pytestmark = pytest.mark.skipif(not os.environ.get("TEST_SQL_SERVER"), reason="N
 
 def test_real_read_only_sql(monkeypatch):
     import pyodbc
+    pyodbc.pooling = False
     server = os.environ["TEST_SQL_SERVER"]
     password = os.environ["TEST_SQL_SA_PASSWORD"]
     admin_dsn = f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={server};UID=sa;PWD={password};Encrypt=yes;TrustServerCertificate=yes"
@@ -55,6 +56,15 @@ def test_real_read_only_sql(monkeypatch):
     database.validate(settings, catalog)
     database.validate(settings.model_copy(update={"encrypt": False}), Catalog(version="optional-tls"))
     assert any(o["object"] == "Sales" for o in database.objects(settings))
+    from concurrent.futures import ThreadPoolExecutor
+    def inspect_repeatedly(_):
+        database.validate(settings, catalog)
+        assert any(o["object"] == "Sales" for o in database.objects(settings))
+        assert len(database.columns(settings, "dbo", "Sales")) == 2
+        result, limited = database.execute(settings, "SELECT TOP (3) customer FROM dbo.Sales", [], 1)
+        assert len(result) == 1 and limited
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(inspect_repeatedly, range(6)))
     query = Query(dataset="sales", group_by=["customer"], measures=[{"column": "amount", "function": "sum", "alias": "total"}])
     sql, values = compile_query(catalog.datasets[0], query)
     rows, truncated = database.execute(settings, sql, values, 100)
