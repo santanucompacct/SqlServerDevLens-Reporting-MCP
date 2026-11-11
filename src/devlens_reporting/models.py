@@ -69,6 +69,7 @@ class Connection(Model):
     password_env: Name = "DEVLENS_SQL_PASSWORD"
     encrypt: bool = True
     trust_server_certificate: bool = False
+    query_timeout_seconds: int = Field(default=60, ge=1, le=120)
 
 
 class Participant(Model):

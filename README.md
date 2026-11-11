@@ -127,3 +127,12 @@ After selecting an object with saved field remarks, use the guided **Prepare and
 Dataset grants allow all rows of the chosen dataset. They are not franchise-specific row security. For an external connection, use the displayed MCP endpoint and a participant bearer token with a compatible MCP client. OAuth/account linking is not implemented in this release. Administrator tokens must never be shared with reporting participants.
 
 Preparation leaves the published catalog unchanged until the administrator explicitly publishes. Prepared drafts are held in the page; re-prepare from saved remarks after a refresh. The advanced JSON controls remain available.
+
+
+## Preview date filters and SQL deadlines (0.3.1)
+
+The guided published-dataset preview uses the first date field (preferring `doc_date`) and the latest seven local calendar days by default. Set From and inclusive To dates before previewing. The generated query uses a lower inclusive bound and an exclusive bound for the following day, which also includes the full To day for datetime columns. Choose No date filter explicitly for an all-history preview. Undated datasets continue to preview without a date filter.
+
+SQL execution has a per-connection `query_timeout_seconds` setting, default 60 seconds and maximum 120. The login timeout stays at 10 seconds. Older saved connections receive the new execution default without losing their field dictionary. Saving SQL details stores a setup draft; publishing activates modified connection settings for reporting.
+
+Private administrator previews now distinguish query timeouts from connectivity problems and may show password-redacted provider diagnostics for otherwise unclassified SQL failures. Participant-facing query failures remain generic. A row limit does not guarantee a fast query when a view must aggregate or join substantial data first; date filters and database-side performance review remain important.

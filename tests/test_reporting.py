@@ -507,3 +507,42 @@ def test_prepare_rejects_missing_dictionary_and_stale_metadata(client, monkeypat
     assert client.post('/admin/api/dataset/prepare', headers=headers(), json=prepare).status_code == 409
     for path in ['dataset/prepare', 'participants/create', 'participants/revoke', 'participants/test']:
         assert client.post('/admin/api/' + path, json={}).status_code == 401
+
+
+def test_query_timeout_setting_and_private_preview_diagnostics(client, monkeypatch):
+    from devlens_reporting.database import Database, RedactedDatabaseError
+    from devlens_reporting.models import Connection
+    assert Connection().query_timeout_seconds == 60
+    assert Connection(query_timeout_seconds=120).query_timeout_seconds == 120
+    with pytest.raises(ValueError):
+        Connection(query_timeout_seconds=121)
+    def fail(self, settings, sql, values, limit):
+        raise RedactedDatabaseError(Exception('HYT00', 'Query timeout expired; PWD=synthetic-secret'),
+                                    'synthetic-secret', settings)
+    monkeypatch.setattr(Database, 'execute', fail)
+    preview = client.post('/admin/api/preview', headers=headers(), json={'dataset': 'sales', 'fields': ['amount']})
+    assert preview.status_code == 400
+    assert 'execution time limit' in preview.text
+    assert 'synthetic-secret' not in preview.text
+    response = rpc(client, 'tools/call', {'name': 'query_dataset', 'arguments': {
+        'query': {'dataset': 'sales', 'fields': ['amount']}}})
+    assert response.json()['result']['isError']
+    assert 'Database query failed' in response.text
+    assert 'HYT00' not in response.text
+
+
+def test_query_timeout_is_applied_to_driver(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from devlens_reporting.database import Database
+    from devlens_reporting.models import Connection
+    class FakeConnection:
+        timeout = None
+        def close(self):
+            pass
+    connection = FakeConnection()
+    monkeypatch.setitem(sys.modules, 'pyodbc', SimpleNamespace(connect=lambda *a, **kw: connection, Error=Exception))
+    monkeypatch.setenv('DEVLENS_SQL_PASSWORD', 'synthetic-secret')
+    settings = Connection(server='synthetic', database='synthetic', username='reader', query_timeout_seconds=45)
+    with Database().connect(settings) as opened:
+        assert opened.timeout == 45

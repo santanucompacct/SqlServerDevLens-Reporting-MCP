@@ -70,7 +70,7 @@ class Database:
                     f"TrustServerCertificate={'yes' if settings.trust_server_certificate else 'no'};"
                     "ApplicationIntent=ReadOnly;"
                     "APP=DevLensReporting;", timeout=10, autocommit=True)
-                connection.timeout = 20
+                connection.timeout = settings.query_timeout_seconds
             except pyodbc.Error as error:
                 if connection is not None:
                     connection.close()
@@ -181,12 +181,14 @@ def connection_error_message(error: Exception, stage: str = "connection") -> str
     if "ssl provider" in lowered or "tls" in lowered:
         return "SQL TLS negotiation failed. Check SQL Server TLS support and the selected encryption settings."
     if state in {"HYT00", "HYT01"} or "timeout" in lowered or "timed out" in lowered:
+        if stage == "query":
+            return "SQL query exceeded its execution time limit. Narrow the date range or ask the administrator to review view performance and blocking."
         return "SQL connection timed out. Check the hostname, TCP port, firewall and server availability."
     if state in {"08001", "08S01"}:
         return "SQL Server could not be reached. Check the hostname, TCP port and network access from the reporting VM."
     if state == "IM002":
         return "Microsoft ODBC Driver 18 for SQL Server is unavailable on the reporting host."
-    if stage == "metadata":
+    if stage in {"metadata", "query"}:
         error_type = type(error).__name__
         allowed_types = {"Exception", "Error", "ProgrammingError", "OperationalError", "InterfaceError",
                          "DatabaseError", "DataError", "NotSupportedError", "TypeError", "AttributeError",
@@ -194,8 +196,8 @@ def connection_error_message(error: Exception, stage: str = "connection") -> str
         if error_type not in allowed_types:
             error_type = "Error"
         sqlstate = state if re.fullmatch(r"[A-Z0-9]{5}", state) else "unavailable"
-        message = ("SQL connection opened, but metadata inspection failed. "
-                   f"Diagnostic {error_type} / SQLSTATE {sqlstate}.")
+        summary = "SQL query failed. " if stage == "query" else "SQL connection opened, but metadata inspection failed. "
+        message = summary + f"Diagnostic {error_type} / SQLSTATE {sqlstate}."
         if isinstance(error, RedactedDatabaseError):
             message += " Driver message " + error.safe_provider_detail
         return message

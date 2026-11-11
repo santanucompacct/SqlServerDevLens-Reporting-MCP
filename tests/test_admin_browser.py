@@ -152,6 +152,8 @@ def test_guided_publishing_and_participant_ui(tmp_path):
             page.locator('#publish_ack').check()
             page.locator('#publish_dataset').click()
             page.wait_for_function("document.querySelector('#status').textContent.startsWith('Reporting dataset published.')")
+            page.locator('#preview_from').fill('2026-01-01')
+            page.locator('#preview_to').fill('2026-01-02')
             page.locator('#preview_dataset').click()
             page.wait_for_function("document.querySelector('#published_preview').textContent.includes('Example A')")
             page.locator('#participant_name').fill('report_tester')

@@ -119,7 +119,7 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
             raise ValueError("Dataset unavailable")
         return next((d for d in state.catalog.datasets if d.id == dataset_id), None)
 
-    async def execute(state, user, query):
+    async def execute(state, user, query, diagnostics=False):
         dataset = visible_dataset(state, user, query.dataset)
         if dataset is None:
             raise ValueError("Dataset unavailable")
@@ -129,8 +129,10 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
                 rows, truncated = await run_in_threadpool(database.execute, state.connection, sql, values, query.limit)
             except ValueError:
                 raise
-            except Exception:
+            except Exception as error:
                 log.warning("instance=%s user=%s dataset=%s outcome=database_error", state.instance, user.name, dataset.id)
+                if diagnostics:
+                    raise ValueError(connection_error_message(error, "query")) from None
                 raise ValueError("Database query failed; ask the administrator to check connectivity and schema") from None
         log.info("instance=%s user=%s dataset=%s rows=%d", state.instance, user.name, dataset.id, len(rows))
         return {"instance": state.instance, "dataset": dataset.id, "catalog_version": state.catalog.version,
@@ -270,7 +272,7 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         saved, revision = setup.read()
         if revision != body.revision:
             raise HTTPException(409, "Saved setup changed; reload the object before preparing")
-        if saved.get("connection") != body.connection.model_dump():
+        if Connection.model_validate(saved.get("connection", {})).model_dump() != body.connection.model_dump():
             raise HTTPException(409, "Save SQL details before preparing the dataset")
         dictionary = saved.get("objects", {}).get(object_key(body.connection, body.schema_name, body.object_name))
         if not dictionary:
@@ -383,7 +385,7 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         admin_user = Participant(name="administrator", token_sha256="0" * 64,
                                  datasets=[d.id for d in state.catalog.datasets])
         try:
-            return await execute(state, admin_user, query)
+            return await execute(state, admin_user, query, diagnostics=True)
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
 
