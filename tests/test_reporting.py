@@ -176,3 +176,49 @@ def test_hyphenated_instance_startup(state, monkeypatch):
         assert loaded["state"]["instance"] == "lalbaba-instance"
     with pytest.raises(ValueError):
         Query(dataset="sales", fields=["column-with-hyphen"])
+
+
+def test_save_sql_password_special_characters(client, state):
+    password = "  aBc123#;{}'\" \u03c8\r\nend  "
+    assert client.post("/admin/api/password", json={"password": password}).status_code == 401
+    result = client.post("/admin/api/password", headers=headers(), json={"password": password})
+    assert result.status_code == 200
+    assert result.json() == {"status": "saved"}
+    stored = state.parent / "sql-password"
+    assert stored.read_bytes().decode("utf-8") == password
+    assert stored.stat().st_mode & 0o777 == 0o600
+    assert password not in client.get("/admin/api/state", headers=headers()).text
+    assert password.encode() not in state.read_bytes()
+    assert client.post("/admin/api/password", headers=headers(), json={"password": ""}).status_code == 400
+    assert client.post("/admin/api/password", headers=headers(), json={"password": "abc\x00def"}).status_code == 400
+    assert stored.read_bytes().decode("utf-8") == password
+
+
+def test_saved_password_odbc_escaping_and_environment_fallback(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from devlens_reporting.database import Database, odbc_value
+    from devlens_reporting.models import Connection
+    captured = []
+    class FakeConnection:
+        timeout = 0
+        def close(self):
+            pass
+    def connect(dsn, **kwargs):
+        captured.append(dsn)
+        return FakeConnection()
+    monkeypatch.setitem(sys.modules, "pyodbc", SimpleNamespace(connect=connect))
+    monkeypatch.setenv("DEVLENS_SQL_PASSWORD", "legacy-environment-password")
+    settings = Connection(server="sql.example.com", database="test", username="reporting")
+    password_path = tmp_path / "sql-password"
+    database = Database(password_path=password_path)
+    with database.connect(settings):
+        pass
+    assert "PWD={legacy-environment-password};" in captured[-1]
+    password = " spaces#;{}'\"\u03c8 "
+    password_path.write_bytes(password.encode("utf-8"))
+    with database.connect(settings):
+        pass
+    assert "PWD=" + odbc_value(password) + ";" in captured[-1]
+    assert "legacy-environment-password" not in captured[-1]
+    assert "Encrypt=yes;TrustServerCertificate=no;" in captured[-1]
