@@ -141,3 +141,25 @@ def test_request_size_and_host_protection(client):
     response = client.post('/mcp', headers={**headers(TOKEN), 'Host': 'attacker.example',
         'Accept': 'application/json, text/event-stream'}, json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
     assert response.status_code == 421
+
+
+def test_separate_catalog_and_failed_manifest_publish(state, monkeypatch):
+    import devlens_reporting.storage as storage
+    store = Store(state)
+    model, revision = store.read()
+    model.catalog.version = 'separate-catalog'
+    new_revision = store.publish(model, revision)
+    manifest = json.loads(state.read_text())
+    assert 'catalog' not in manifest
+    assert json.loads((state.parent / manifest['catalog_file']).read_text())['version'] == 'separate-catalog'
+    assert store.read()[0].catalog.version == 'separate-catalog'
+    original_write = storage.atomic_write
+    def fail_manifest(path, raw):
+        if path == state:
+            raise OSError('Simulated disk failure')
+        original_write(path, raw)
+    monkeypatch.setattr(storage, 'atomic_write', fail_manifest)
+    model.catalog.version = 'must-not-publish'
+    with pytest.raises(OSError):
+        store.publish(model, new_revision)
+    assert store.read()[0].catalog.version == 'separate-catalog'
