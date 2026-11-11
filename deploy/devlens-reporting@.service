@@ -1,0 +1,25 @@
+[Unit]
+Description=DevLens Reporting instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devlens-%i
+Group=devlens-%i
+WorkingDirectory=/var/lib/devlens-reporting/%i
+EnvironmentFile=/etc/devlens-reporting/%i.env
+ExecStart=/opt/devlens-reporting/venv/bin/devlens-reporting
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/devlens-reporting/%i
+MemoryMax=768M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
