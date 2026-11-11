@@ -321,3 +321,57 @@ def test_provider_diagnostic_redacts_used_password_and_connection_details(tmp_pa
     assert "SQLSTATE HY000" in message
     for value in [password, odbc_value(password), "private-host", "private-db", "private-user"]:
         assert value not in message
+
+def test_database_closes_pending_results(monkeypatch):
+    from contextlib import contextmanager
+    from devlens_reporting.database import Database
+    from devlens_reporting.models import Connection
+
+    cursors = []
+    class Cursor:
+        description = [("value",)]
+        pending = False
+        closed = False
+        def execute(self, sql, *args):
+            assert not self.pending, "Connection is busy with results for another command"
+            self.pending = True
+            return self
+        def fetchall(self):
+            self.pending = False
+            return []
+        def fetchone(self):
+            return (1,)
+        def close(self):
+            self.pending = False
+            self.closed = True
+    class ConnectionStub:
+        def cursor(self):
+            cursor = Cursor()
+            cursors.append(cursor)
+            return cursor
+    @contextmanager
+    def connect(settings):
+        start = len(cursors)
+        try:
+            yield ConnectionStub()
+        finally:
+            assert all(c.closed and not c.pending for c in cursors[start:])
+    database = Database()
+    monkeypatch.setattr(database, "connect", connect)
+    settings = Connection()
+    dataset = {"id": "sales", "object_name": "Sales", "description": "sales", "grain": "row",
+               "columns": [{"name": "value", "description": "value", "kind": "number"}]}
+    catalog = Catalog.model_validate({"version": "cursor-test", "datasets": [
+        dataset, {**dataset, "id": "other", "object_name": "Other"}]})
+    database.validate(settings, catalog)
+    assert database.objects(settings) == []
+    assert database.columns(settings, "dbo", "Sales") == []
+    assert database.execute(settings, "SELECT value FROM dbo.Sales", [], 1) == ([{"value": 1}], True)
+    with pytest.raises(ValueError, match="Binary columns"):
+        original_cursor = ConnectionStub.cursor
+        def binary_cursor(self):
+            cursor = original_cursor(self)
+            cursor.fetchone = lambda: (b"binary",)
+            return cursor
+        monkeypatch.setattr(ConnectionStub, "cursor", binary_cursor)
+        database.execute(settings, "SELECT value FROM dbo.Sales", [], 1)
