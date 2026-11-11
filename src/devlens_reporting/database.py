@@ -2,7 +2,7 @@
 import os
 import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -51,6 +51,8 @@ class Database:
             """)
         else:
             import pyodbc
+            # Each reporting operation owns and closes its physical connection.
+            pyodbc.pooling = False
             if self.password_path is not None and self.password_path.exists():
                 password = self.password_path.read_bytes().decode("utf-8")
             else:
@@ -84,40 +86,44 @@ class Database:
             raise RedactedDatabaseError(error, password, settings) from None
 
     def validate(self, settings: Connection, catalog: Catalog):
+        from .query import quote
         with self.connect(settings) as connection:
-            cursor = connection.cursor()
-            cursor.execute("SELECT 1")
-            for dataset in catalog.datasets:
-                from .query import quote
-                fields = ", ".join(quote(c.name) for c in dataset.columns)
-                cursor.execute(f"SELECT {fields} FROM {quote(dataset.schema_name)}.{quote(dataset.object_name)} WHERE 1=0")
+            with closing(connection.cursor()) as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchall()
+                for dataset in catalog.datasets:
+                    fields = ", ".join(quote(c.name) for c in dataset.columns)
+                    cursor.execute(f"SELECT {fields} FROM {quote(dataset.schema_name)}.{quote(dataset.object_name)} WHERE 1=0")
+                    cursor.fetchall()
 
     def objects(self, settings: Connection):
         if self.demo:
             return [{"schema": "dbo", "object": "Sales", "type": "demo"}]
         with self.connect(settings) as connection:
-            rows = connection.cursor().execute("""
-                SELECT TOP (500) s.name, o.name, o.type_desc
-                FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
-                WHERE o.type IN ('U','V') AND o.is_ms_shipped=0
-                ORDER BY s.name,o.name
-            """).fetchall()
-            return [{"schema": r[0], "object": r[1], "type": r[2]} for r in rows]
+            with closing(connection.cursor()) as cursor:
+                rows = cursor.execute("""
+                    SELECT TOP (500) s.name, o.name, o.type_desc
+                    FROM sys.objects o JOIN sys.schemas s ON s.schema_id=o.schema_id
+                    WHERE o.type IN ('U','V') AND o.is_ms_shipped=0
+                    ORDER BY s.name,o.name
+                """).fetchall()
+                return [{"schema": r[0], "object": r[1], "type": r[2]} for r in rows]
 
     def columns(self, settings: Connection, schema: str, name: str):
         if self.demo:
             return [{"name": n, "sql_type": t, "nullable": True} for n, t in
                     [("customer", "nvarchar"), ("doc_date", "date"), ("amount", "decimal"), ("branch", "nvarchar")]]
         with self.connect(settings) as connection:
-            rows = connection.cursor().execute("""
-                SELECT c.name,t.name,c.is_nullable
-                FROM sys.columns c JOIN sys.objects o ON o.object_id=c.object_id
-                JOIN sys.schemas s ON s.schema_id=o.schema_id
-                JOIN sys.types t ON t.user_type_id=c.user_type_id
-                WHERE s.name=? AND o.name=? AND o.type IN ('U','V')
-                ORDER BY c.column_id
-            """, schema, name).fetchall()
-            return [{"name": r[0], "sql_type": r[1], "nullable": bool(r[2])} for r in rows]
+            with closing(connection.cursor()) as cursor:
+                rows = cursor.execute("""
+                    SELECT c.name,t.name,c.is_nullable
+                    FROM sys.columns c JOIN sys.objects o ON o.object_id=c.object_id
+                    JOIN sys.schemas s ON s.schema_id=o.schema_id
+                    JOIN sys.types t ON t.user_type_id=c.user_type_id
+                    WHERE s.name=? AND o.name=? AND o.type IN ('U','V')
+                    ORDER BY c.column_id
+                """, schema, name).fetchall()
+                return [{"name": r[0], "sql_type": r[1], "nullable": bool(r[2])} for r in rows]
 
     def execute(self, settings: Connection, sql: str, values: list, limit: int):
         if self.demo:
@@ -125,30 +131,30 @@ class Database:
             sql = sql.replace(top.group(0), "SELECT ", 1).replace("COUNT_BIG(", "COUNT(")
             sql += " LIMIT " + top.group(1)
         with self.connect(settings) as connection:
-            cursor = connection.cursor()
-            cursor.execute(sql, values)
-            names = [description[0] for description in cursor.description]
-            rows, size = [], 0
-            while len(rows) < limit + 1:
-                row = cursor.fetchone()
-                if row is None:
-                    break
-                result = {}
-                for name, value in zip(names, row):
-                    if isinstance(value, (date, datetime)):
-                        value = value.isoformat()
-                    elif isinstance(value, Decimal):
-                        value = str(value)  # Preserve exact monetary precision.
-                    elif isinstance(value, bytes):
-                        raise ValueError("Binary columns are unsupported")
-                    if isinstance(value, str) and len(value) > 16000:
-                        raise ValueError("Result contains an oversized cell; narrow the query")
-                    result[name] = value
-                size += len(str(result).encode())
-                if size > 2_000_000:
-                    raise ValueError("Result exceeds 2 MB; narrow the query")
-                rows.append(result)
-            return rows[:limit], len(rows) > limit
+            with closing(connection.cursor()) as cursor:
+                cursor.execute(sql, values)
+                names = [description[0] for description in cursor.description]
+                rows, size = [], 0
+                while len(rows) < limit + 1:
+                    row = cursor.fetchone()
+                    if row is None:
+                        break
+                    result = {}
+                    for name, value in zip(names, row):
+                        if isinstance(value, (date, datetime)):
+                            value = value.isoformat()
+                        elif isinstance(value, Decimal):
+                            value = str(value)  # Preserve exact monetary precision.
+                        elif isinstance(value, bytes):
+                            raise ValueError("Binary columns are unsupported")
+                        if isinstance(value, str) and len(value) > 16000:
+                            raise ValueError("Result contains an oversized cell; narrow the query")
+                        result[name] = value
+                    size += len(str(result).encode())
+                    if size > 2_000_000:
+                        raise ValueError("Result exceeds 2 MB; narrow the query")
+                    rows.append(result)
+                return rows[:limit], len(rows) > limit
 
 
 
