@@ -98,3 +98,89 @@ def test_private_admin_workflow(tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+def test_guided_publishing_and_participant_ui(tmp_path):
+    from playwright.sync_api import sync_playwright
+    state = tmp_path / 'instance.json'
+    state.write_text(Path('examples/instance.json').read_text())
+    token = 'synthetic-guided-admin-token-1234567890'
+    environment = {**os.environ, 'DEVLENS_STATE': str(state), 'DEVLENS_DEMO': '1',
+                   'DEVLENS_ADMIN_TOKEN': token, 'DEVLENS_PORT': '8130'}
+    process = subprocess.Popen(['devlens-reporting'], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = 'http://127.0.0.1:8130'
+    try:
+        for _ in range(100):
+            try:
+                if httpx.get(url + '/health', trust_env=False).status_code == 200:
+                    break
+            except httpx.ConnectError:
+                pass
+            time.sleep(.1)
+        with sync_playwright() as driver:
+            browser = driver.chromium.launch(executable_path=os.environ.get('DEVLENS_CHROMIUM'))
+            page = browser.new_page()
+            errors = []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(url + '/admin')
+            page.locator('#token').fill(token)
+            page.locator('#load').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Loaded synthetic demo configuration'")
+            for key, value in [('server', 'synthetic'), ('database', 'synthetic'), ('username', 'reader')]:
+                page.locator('#' + key).fill(value)
+            page.locator('#save_connection').click()
+            page.wait_for_function("document.querySelector('#status').textContent.startsWith('SQL details saved.')")
+            page.locator('#inspect').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Demo metadata loaded (synthetic data)'")
+            page.locator('#object_select').select_option(index=1)
+            page.wait_for_function("document.querySelector('#status').textContent === 'Object fields loaded'")
+            for name in ['customer', 'doc_date', 'amount', 'branch']:
+                page.get_by_label('Remarks for ' + name, exact=True).fill('Meaning of ' + name)
+            assert page.locator('#prepare_dataset').is_disabled()
+            page.locator('#save_fields').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Field remarks saved'")
+            page.locator('#dataset_id').fill('franchise_sales')
+            page.locator('#dataset_description').fill('Franchise sales reporting')
+            page.locator('#dataset_grain').fill('One sales row')
+            page.locator('#dataset_rules').fill('Do not sum identifiers.\nAmounts are synthetic for this test.')
+            page.locator('#prepare_dataset').click()
+            page.wait_for_function("document.querySelector('#status').textContent.startsWith('Dataset prepared.')")
+            assert page.locator('#prepared_columns tr').count() == 4
+            assert page.get_by_label('Reporting type for amount', exact=True).input_value() == 'number'
+            assert page.locator('#replace_example').is_checked()
+            assert page.locator('#publish_dataset').is_disabled()
+            page.locator('#publish_ack').check()
+            page.locator('#publish_dataset').click()
+            page.wait_for_function("document.querySelector('#status').textContent.startsWith('Reporting dataset published.')")
+            page.locator('#preview_dataset').click()
+            page.wait_for_function("document.querySelector('#published_preview').textContent.includes('Example A')")
+            page.locator('#participant_name').fill('report_tester')
+            page.locator('#dataset_grants input[value="franchise_sales"]').check()
+            page.locator('#create_participant').click()
+            page.wait_for_function("document.querySelector('#status').textContent.startsWith('Participant active.')")
+            participant_token = page.locator('#issued_token').text_content()
+            assert len(participant_token) >= 32
+            assert participant_token not in state.read_text()
+            page.locator('#test_participant').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Participant token, dataset grant and read-only query passed'")
+            assert 'franchise_sales' in page.locator('#participant_test_result').text_content()
+            page.screenshot(path=str(tmp_path / 'publishing-desktop.png'), full_page=True)
+            page.set_viewport_size({'width': 390, 'height': 844})
+            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+            page.on('dialog', lambda dialog: dialog.accept())
+            page.locator('#participant_rows button').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Participant access revoked'")
+            page.locator('#test_participant').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Invalid participant token'")
+            page.reload()
+            page.locator('#token').fill(token)
+            page.locator('#load').click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'Loaded synthetic demo configuration'")
+            assert page.locator('#issued_token_panel').is_hidden()
+            assert page.locator('#participant_test_token').input_value() == ''
+            assert page.locator('#published_dataset').input_value() == 'franchise_sales'
+            assert not errors
+            browser.close()
+    finally:
+        process.terminate()
+        process.wait(timeout=10)

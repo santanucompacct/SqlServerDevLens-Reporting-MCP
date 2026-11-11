@@ -21,6 +21,25 @@
 <div id="field_panel" hidden><h2>Field dictionary <span id="field_count" class="badge"></span></h2><p id="selected_object"></p><small>SQL types and nullable flags come from SQL Server. Enter business meanings or reporting rules in Remarks.</small><div class="grid-wrap"><table><thead><tr><th scope="col">Name</th><th scope="col">SQL type</th><th scope="col">Nullable</th><th scope="col">Remarks</th></tr></thead><tbody id="field_rows"></tbody></table></div><button id="save_fields" disabled>Save field remarks</button><small id="field_saved"></small></div>
 <details><summary>Connection diagnostic details</summary><pre id="metadata"></pre></details>
 </section>
+<section><h2><span class="step">4</span>Prepare and publish reporting dataset</h2>
+<p>Select your object above and save all field remarks first. Preparing creates a draft for review. Publishing makes it available for participant grants.</p>
+<div class="fields"><label><span>Dataset ID</span><input id="dataset_id" placeholder="franchise_sales" maxlength="128"></label><label><span>Purpose</span><textarea id="dataset_description" rows="2" maxlength="4000" placeholder="What questions can this dataset answer?"></textarea></label></div>
+<label><span>Row level</span><textarea id="dataset_grain" rows="2" maxlength="2000" placeholder="For example: one row per transaction date, franchise store and product"></textarea></label>
+<label><span>Reporting rules (one per line)</span><textarea id="dataset_rules" rows="5" placeholder="Document returns, NULL values, valid calculations and limits of interpretation."></textarea></label>
+<button id="prepare_dataset" disabled>Prepare reporting dataset</button>
+<div id="prepared_panel" hidden><p id="prepared_summary"></p><small>Review each field's reporting type. Numeric IDs should be treated as identifiers when analysing data. All included fields will be queryable by participants granted this dataset.</small>
+<div class="grid-wrap"><table><thead><tr><th>Field</th><th>Reporting type</th><th>Description</th></tr></thead><tbody id="prepared_columns"></tbody></table></div>
+<label><input id="replace_example" type="checkbox"> Replace the initial example Sales dataset</label><small>Available only when the untouched example is the sole published dataset and no participant depends on it.</small>
+<p id="publish_impact" class="hint"></p><label><input id="publish_ack" type="checkbox"> I have reviewed the fields and rules and want to publish this dataset.</label>
+<button id="publish_dataset" disabled>Validate and publish dataset</button></div>
+<label><span>Published dataset</span><select id="published_dataset"></select></label><button id="preview_dataset" disabled>Preview published dataset</button><pre id="published_preview"></pre>
+</section>
+<section><h2><span class="step">5</span>Participant access and connection</h2><p>Create a separate participant for each person or client. A participant can query every row in its selected datasets. These grants do not apply a franchise-specific row filter.</p>
+<label><span>Participant name</span><input id="participant_name" placeholder="santanu_reporting" maxlength="128"></label><fieldset><legend>Allowed published datasets</legend><div id="dataset_grants"></div></fieldset>
+<button id="create_participant" disabled>Create participant and activate token</button><div id="issued_token_panel" hidden><p>Copy this token now and share it privately. It cannot be retrieved later. The server stores its hash only.</p><pre id="issued_token"></pre><button id="copy_participant_token" class="secondary">Copy token</button></div>
+<div class="grid-wrap"><table><thead><tr><th>Participant</th><th>Allowed datasets</th><th>Action</th></tr></thead><tbody id="participant_rows"></tbody></table></div>
+<label><span>MCP endpoint</span><input id="mcp_endpoint" readonly></label><small>Authentication: Bearer token. Use the participant token, never the administrator token. OAuth/account linking is not implemented yet; the connecting client must support bearer-token MCP access.</small>
+<label><span>Participant token to test</span><input id="participant_test_token" type="password" autocomplete="off"></label><button id="test_participant" disabled>Test participant access</button><small>This checks the token, dataset grant and a small read-only query on this server. It does not verify an external ChatGPT or Gemini account connection.</small><pre id="participant_test_result"></pre></section>
 <details class="advanced"><summary>Advanced: dataset publishing and participants</summary><p>Continue here when the field dictionary is ready. Saving field remarks above does not yet publish an allowed dataset.</p>
 <section><h2>Dataset dictionary</h2><p>Define approved objects, columns, row grain, business rules and documented relationships.</p><label>Catalog JSON <textarea id="catalog" rows="16" spellcheck="false"></textarea></label><button id="export">Download catalog JSON</button><label>Import catalog JSON <input type="file" id="import" accept="application/json"></label></section>
 <section><h2>Participants</h2><label>New participant name <input id="new_user"></label><button id="generate">Generate participant token</button><pre id="new_token"></pre><label>Participant JSON <textarea id="participants" rows="8" spellcheck="false"></textarea></label></section>
@@ -29,30 +48,161 @@
 </details>
 <script>
 const byId=id=>document.getElementById(id);
+let publishedState=null, prepared=null, preparedConnection='', preparedSetupRevision=null, draftVersion=0;
 let revision=null, setupRevision=null, savedConnection='', objectConnection='', selected=null, fields=[], dirty=false, requestId=0, busy=false;
 function status(message,error=false){byId('status').textContent=message;byId('status').classList.toggle('error',error)}
 async function api(path,body){const options={headers:{Authorization:'Bearer '+byId('token').value}};if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify(body)}const response=await fetch('/admin/api/'+path,options);const result=await response.json();if(!response.ok)throw Error(typeof result.detail==='string'?result.detail:JSON.stringify(result.detail));return result}
 function connection(){return {server:byId('server').value,port:Number(byId('port').value),database:byId('database').value,username:byId('username').value,password_env:byId('password_env').value,encrypt:byId('encrypt').checked,trust_server_certificate:byId('trust_server_certificate').checked}}
 function connectionText(){return JSON.stringify(connection())}
 function grantHelp(){const bracket=value=>'['+value.replaceAll(']',']]')+']';byId('grant_help').textContent='USE '+bracket(byId('database').value||'db name')+';\nGRANT SELECT ON OBJECT::'+bracket(selected?.schema||'dbo')+'.'+bracket(selected?.object||'YourReportingView')+'\nTO '+bracket(byId('username').value||'login_name')+';'}
-function clearFields(){requestId++;selected=null;fields=[];dirty=false;byId('field_panel').hidden=true;byId('field_rows').replaceChildren();byId('save_fields').disabled=true;grantHelp()}
+function clearFields(){invalidatePrepared();requestId++;selected=null;fields=[];dirty=false;byId('field_panel').hidden=true;byId('field_rows').replaceChildren();byId('save_fields').disabled=true;grantHelp()}
 function populateObjects(objects){clearFields();const select=byId('object_select');select.replaceChildren(new Option(objects.length?'Select a table or view':'No visible tables or views',''));for(const item of objects)select.add(new Option(item.schema+'.'+item.object+' ('+item.type.toLowerCase()+')',JSON.stringify(item)));select.disabled=!objects.length;objectConnection=connectionText()}
-function updateButtons(){byId('save_connection').textContent=savedConnection?'Update SQL details':'Save SQL details';byId('inspect').disabled=!setupRevision||savedConnection!==connectionText()||busy;byId('save_fields').disabled=!selected||objectConnection!==connectionText()||busy;}
-function lockInputs(locked){for(const id of ['server','port','database','username','password_env','encrypt','trust_server_certificate','sql_password'])byId(id).disabled=locked;}
+function updateButtons(){byId('save_connection').textContent=savedConnection?'Update SQL details':'Save SQL details';byId('inspect').disabled=!setupRevision||savedConnection!==connectionText()||busy;byId('save_fields').disabled=!selected||objectConnection!==connectionText()||busy;byId('prepare_dataset').disabled=!selected||dirty||savedConnection!==connectionText()||objectConnection!==connectionText()||busy;byId('publish_dataset').disabled=!prepared||!byId('publish_ack').checked||busy;byId('preview_dataset').disabled=!publishedState?.catalog.datasets.length||busy;byId('create_participant').disabled=!publishedState?.catalog.datasets.length||busy;byId('test_participant').disabled=!publishedState||busy;}
+function lockInputs(locked){for(const id of ['server','port','database','username','password_env','encrypt','trust_server_certificate','sql_password','dataset_id','dataset_description','dataset_grain','dataset_rules'])byId(id).disabled=locked;}
 function action(id,fn){byId(id).onclick=async()=>{if(busy)return;busy=true;lockInputs(true);byId(id).disabled=true;try{await fn()}catch(e){status(e.message,true)}finally{busy=false;lockInputs(false);byId(id).disabled=false;updateButtons()}}}
-action('load',async()=>{if(dirty&&!confirm('Discard unsaved field remarks and load the configuration?'))return;const result=await api('state');revision=result.revision;setupRevision=result.setup.revision;byId('instance').value=result.state.instance;for(const [key,value] of Object.entries(result.setup.connection)){if(typeof value==='boolean')byId(key).checked=value;else byId(key).value=value}savedConnection=result.setup.saved?connectionText():'';byId('connection_saved').textContent=result.setup.saved?'Saved SQL details loaded.':'Enter and save SQL details to continue.';byId('sql_password').value='';byId('password_saved').textContent=result.password_saved?'SQL password is saved on the server. Leave blank to keep it.':'No saved SQL password. Enter and save credentials below.';byId('catalog').value=JSON.stringify(result.state.catalog,null,2);byId('participants').value=JSON.stringify(result.state.participants,null,2);populateObjects(result.setup.objects);byId('save_connection').disabled=false;byId('save_password').disabled=false;status(result.demo?'Loaded synthetic demo configuration':'Loaded published configuration');});
+action('load',async()=>{if(dirty&&!confirm('Discard unsaved field remarks and load the configuration?'))return;const result=await api('state');revision=result.revision;publishedState=result.state;renderPublished();byId('mcp_endpoint').value=result.mcp_url;byId('issued_token_panel').hidden=true;byId('issued_token').textContent='';byId('participant_test_token').value='';setupRevision=result.setup.revision;byId('instance').value=result.state.instance;for(const [key,value] of Object.entries(result.setup.connection)){if(typeof value==='boolean')byId(key).checked=value;else byId(key).value=value}savedConnection=result.setup.saved?connectionText():'';byId('connection_saved').textContent=result.setup.saved?'Saved SQL details loaded.':'Enter and save SQL details to continue.';byId('sql_password').value='';byId('password_saved').textContent=result.password_saved?'SQL password is saved on the server. Leave blank to keep it.':'No saved SQL password. Enter and save credentials below.';byId('catalog').value=JSON.stringify(result.state.catalog,null,2);byId('participants').value=JSON.stringify(result.state.participants,null,2);populateObjects(result.setup.objects);byId('save_connection').disabled=false;byId('save_password').disabled=false;status(result.demo?'Loaded synthetic demo configuration':'Loaded published configuration');});
 action('save_connection',async()=>{if(!setupRevision)throw Error('Load the configuration first');const result=await api('connection',{revision:setupRevision,connection:connection()});setupRevision=result.revision;savedConnection=connectionText();byId('connection_saved').textContent='SQL details saved on the server.';status('SQL details saved. Test SQL to list objects.');});
 action('save_password',async()=>{if(!setupRevision)throw Error('Load the configuration first');await api('password',{password:byId('sql_password').value});byId('sql_password').value='';byId('password_saved').textContent='SQL password is saved on the server. Leave blank to keep it.';status('SQL password saved. Test the connection next.');});
 action('inspect',async()=>{if(savedConnection!==connectionText())throw Error('Save SQL details before testing');if(dirty&&!confirm('Discard unsaved field remarks and reload objects?'))return;populateObjects([]);byId('object_status').textContent='Connecting to SQL Server…';const result=await api('test',{connection:connection()});byId('metadata').textContent=JSON.stringify(result,null,2);populateObjects(result.objects);byId('object_status').textContent=result.objects.length+' visible object(s).'+(result.objects.length?' Select one to read its fields.':' Check the database and SELECT grants in the help below.');status(result.demo?'Demo metadata loaded (synthetic data)':'SQL connection verified');});
-function renderFields(){const rows=byId('field_rows');rows.replaceChildren();for(const column of fields){const row=document.createElement('tr');for(const value of [column.name,column.sql_type,column.nullable?'Yes':'No']){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}const cell=document.createElement('td'),input=document.createElement('textarea');input.value=column.remarks;input.maxLength=2000;input.setAttribute('aria-label','Remarks for '+column.name);input.addEventListener('input',()=>{column.remarks=input.value;dirty=true;byId('field_saved').textContent='Unsaved remarks'});cell.append(input);row.append(cell);rows.append(row)}byId('selected_object').textContent=selected.schema+'.'+selected.object;byId('field_count').textContent=fields.length+' fields';byId('field_panel').hidden=false;byId('field_saved').textContent='Saved remarks loaded. New fields start with blank remarks.';updateButtons()}
+function renderFields(){const rows=byId('field_rows');rows.replaceChildren();for(const column of fields){const row=document.createElement('tr');for(const value of [column.name,column.sql_type,column.nullable?'Yes':'No']){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}const cell=document.createElement('td'),input=document.createElement('textarea');input.value=column.remarks;input.maxLength=2000;input.setAttribute('aria-label','Remarks for '+column.name);input.addEventListener('input',()=>{column.remarks=input.value;dirty=true;invalidatePrepared();updateButtons();byId('field_saved').textContent='Unsaved remarks'});cell.append(input);row.append(cell);rows.append(row)}byId('selected_object').textContent=selected.schema+'.'+selected.object;byId('field_count').textContent=fields.length+' fields';byId('field_panel').hidden=false;byId('dataset_id').value=selected.object.replace(/[^A-Za-z0-9_]/g,'_').replace(/^[^A-Za-z_]/,'_$&');byId('dataset_description').value='';byId('dataset_grain').value='';byId('dataset_rules').value='';const existing=publishedState?.catalog.datasets.find(d=>d.schema_name===selected.schema&&d.object_name===selected.object);if(existing){byId('dataset_id').value=existing.id;byId('dataset_description').value=existing.description;byId('dataset_grain').value=existing.grain;byId('dataset_rules').value=existing.business_rules.join('\n')}byId('field_saved').textContent='Saved remarks loaded. New fields start with blank remarks.';updateButtons()}
 byId('object_select').onchange=async()=>{const select=byId('object_select');if(busy){select.value=selected?JSON.stringify(selected):'';return}if(dirty&&!confirm('Discard unsaved field remarks and select another object?')){select.value=selected?JSON.stringify(selected):'';return}const value=select.value;clearFields();if(!value)return;if(objectConnection!==connectionText()){status('SQL details changed. Save and test SQL again.',true);return}const item=JSON.parse(value),id=++requestId;select.disabled=true;busy=true;lockInputs(true);try{status('Reading object fields…');const result=await api('object',{connection:connection(),schema_name:item.schema,object_name:item.object});if(id!==requestId)return;setupRevision=result.revision;selected=item;fields=result.columns;renderFields();grantHelp();status('Object fields loaded')}catch(e){status(e.message,true)}finally{busy=false;lockInputs(false);select.disabled=select.options.length<=1||!setupRevision;updateButtons()}};
 action('save_fields',async()=>{if(!selected||objectConnection!==connectionText())throw Error('Select an object from the current SQL connection');const result=await api('object/save',{revision:setupRevision,connection:connection(),schema_name:selected.schema,object_name:selected.object,columns:fields.map(({name,remarks})=>({name,remarks}))});setupRevision=result.revision;dirty=false;byId('field_saved').textContent='Field remarks saved on the server.';status('Field remarks saved');});
-for(const id of ['server','port','database','username','password_env','encrypt','trust_server_certificate'])byId(id).addEventListener('input',()=>{if(dirty){byId('field_saved').textContent='Connection changed. Save remarks before changing the connection.'}byId('object_select').disabled=true;byId('save_fields').disabled=true;grantHelp();updateButtons();byId('save_fields').disabled=true;});
+for(const id of ['server','port','database','username','password_env','encrypt','trust_server_certificate'])byId(id).addEventListener('input',()=>{invalidatePrepared();if(dirty){byId('field_saved').textContent='Connection changed. Save remarks before changing the connection.'}byId('object_select').disabled=true;byId('save_fields').disabled=true;grantHelp();updateButtons();byId('save_fields').disabled=true;});
 window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue=''}});
-action('publish',async()=>{if(!revision)throw Error('Load the published configuration first');const result=await api('publish',{revision,state:{instance:byId('instance').value,connection:connection(),catalog:JSON.parse(byId('catalog').value),participants:JSON.parse(byId('participants').value)}});revision=result.revision;status('Configuration published')});
+action('publish',async()=>{if(!revision)throw Error('Load the published configuration first');const result=await api('publish',{revision,state:{instance:byId('instance').value,connection:connection(),catalog:JSON.parse(byId('catalog').value),participants:JSON.parse(byId('participants').value)}});revision=result.revision;await reloadPublished();invalidatePrepared();status('Configuration published')});
 action('preview',async()=>{byId('results').textContent=JSON.stringify(await api('preview',JSON.parse(byId('query').value)),null,2)});
 action('generate',async()=>{const bytes=crypto.getRandomValues(new Uint8Array(32));const token=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token));const token_sha256=Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('');const users=JSON.parse(byId('participants').value||'[]');users.push({name:byId('new_user').value,token_sha256,datasets:[]});byId('participants').value=JSON.stringify(users,null,2);byId('new_token').textContent='Copy and securely share this participant token, then set its dataset IDs and publish.\n'+token});
 action('export',async()=>{const blob=new Blob([JSON.stringify(JSON.parse(byId('catalog').value),null,2)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='catalog.json';a.click();URL.revokeObjectURL(url)});
 byId('import').onchange=async event=>{try{const file=event.target.files[0];if(!file)return;if(file.size>262144)throw Error('Catalog file is too large');byId('catalog').value=JSON.stringify(JSON.parse(await file.text()),null,2);status('Catalog imported into local draft')}catch(e){status(e.message,true)}};
+
+function invalidatePrepared() {
+    draftVersion++;
+    prepared = null;
+    byId('prepared_panel').hidden = true;
+    byId('publish_ack').checked = false;
+    byId('publish_dataset').disabled = true;
+}
+function isInitialExample() {
+    const datasets = publishedState?.catalog.datasets || [];
+    return datasets.length === 1 && datasets[0].id === 'sales'
+        && datasets[0].object_name === 'Sales' && datasets[0].schema_name === 'dbo'
+        && publishedState.participants.length === 0;
+}
+async function reloadPublished() {
+    const result = await api('state');
+    revision = result.revision;
+    publishedState = result.state;
+    byId('catalog').value = JSON.stringify(result.state.catalog, null, 2);
+    byId('participants').value = JSON.stringify(result.state.participants, null, 2);
+    renderPublished();
+}
+function renderPublished() {
+    const select = byId('published_dataset'), grants = byId('dataset_grants');
+    select.replaceChildren(); grants.replaceChildren();
+    for (const dataset of publishedState.catalog.datasets) {
+        select.add(new Option(dataset.id + ' — ' + dataset.description, dataset.id));
+        const label = document.createElement('label'), input = document.createElement('input');
+        input.type = 'checkbox'; input.value = dataset.id;
+        label.append(input, document.createTextNode(dataset.id)); grants.append(label);
+    }
+    if (!select.options.length) select.add(new Option('Publish a dataset first', ''));
+    const rows = byId('participant_rows'); rows.replaceChildren();
+    for (const user of publishedState.participants) {
+        const row = document.createElement('tr');
+        for (const value of [user.name, user.datasets.join(', ')]) {
+            const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+        }
+        const cell = document.createElement('td'), button = document.createElement('button');
+        button.textContent = 'Revoke'; button.className = 'secondary';
+        button.onclick = async () => {
+            if (busy || !confirm('Revoke access for ' + user.name + '?')) return;
+            busy = true; button.disabled = true;
+            try {
+                await api('participants/revoke', {revision, name: user.name});
+                await reloadPublished(); status('Participant access revoked');
+            } catch (error) { status(error.message, true); }
+            finally { busy = false; button.disabled = false; updateButtons(); }
+        };
+        cell.append(button); row.append(cell); rows.append(row);
+    }
+}
+for (const id of ['dataset_id', 'dataset_description', 'dataset_grain', 'dataset_rules']) {
+    byId(id).addEventListener('input', () => { invalidatePrepared(); updateButtons(); });
+}
+byId('publish_ack').onchange = updateButtons;
+action('prepare_dataset', async () => {
+    if (!selected || dirty || savedConnection !== connectionText()) throw Error('Select an object and save its SQL details and field remarks first');
+    const version = draftVersion;
+    const result = await api('dataset/prepare', {
+        revision: setupRevision, connection: connection(), schema_name: selected.schema,
+        object_name: selected.object, dataset_id: byId('dataset_id').value.trim(),
+        description: byId('dataset_description').value.trim(), grain: byId('dataset_grain').value.trim(),
+        business_rules: byId('dataset_rules').value.split('\n').map(value => value.trim()).filter(Boolean)
+    });
+    if (version !== draftVersion) throw Error('Dataset details changed during preparation. Prepare again.');
+    prepared = result.dataset; preparedSetupRevision = result.setup_revision;
+    preparedConnection = connectionText();
+    byId('prepared_summary').textContent = prepared.id + ' · ' + prepared.schema_name + '.' + prepared.object_name + ' · ' + prepared.columns.length + ' approved fields';
+    const rows = byId('prepared_columns'); rows.replaceChildren();
+    for (const column of prepared.columns) {
+        const row = document.createElement('tr'), name = document.createElement('td');
+        name.textContent = column.name; row.append(name);
+        const type = document.createElement('td'), select = document.createElement('select');
+        select.setAttribute('aria-label', 'Reporting type for ' + column.name);
+        for (const kind of ['text', 'number', 'date', 'boolean']) select.add(new Option(kind, kind));
+        select.value = column.kind;
+        select.onchange = () => { column.kind = select.value; byId('publish_ack').checked = false; updateButtons(); };
+        type.append(select); row.append(type);
+        const description = document.createElement('td'); description.textContent = column.description; row.append(description); rows.append(row);
+    }
+    byId('replace_example').disabled = !isInitialExample();
+    byId('replace_example').checked = isInitialExample();
+    byId('publish_impact').textContent = 'Publishing activates the SQL connection shown above for every published dataset. Existing participant grants are preserved. A matching dataset ID is updated; other datasets are retained unless the initial example is removed.';
+    byId('publish_ack').checked = false; byId('prepared_panel').hidden = false;
+    status('Dataset prepared. Review the fields and confirm before publishing.');
+});
+action('publish_dataset', async () => {
+    if (!prepared || !byId('publish_ack').checked || preparedConnection !== connectionText() || dirty) throw Error('Prepare and review the dataset first');
+    const fresh = await api('state');
+    if (fresh.revision !== revision || fresh.setup.revision !== preparedSetupRevision) throw Error('Configuration or field remarks changed. Load the configuration and prepare again.');
+    const next = structuredClone(publishedState);
+    if (byId('replace_example').checked) {
+        if (!isInitialExample()) throw Error('The example dataset can no longer be replaced automatically');
+        next.catalog.datasets = [];
+    }
+    next.catalog.datasets = next.catalog.datasets.filter(dataset => dataset.id !== prepared.id);
+    next.catalog.datasets.push(prepared);
+    next.catalog.version = new Date().toISOString(); next.connection = connection();
+    const datasetId = prepared.id;
+    await api('publish', {revision, state: next});
+    await reloadPublished(); byId('published_dataset').value = datasetId;
+    invalidatePrepared(); status('Reporting dataset published. Preview it or create participant access below.');
+});
+action('preview_dataset', async () => {
+    const dataset = publishedState.catalog.datasets.find(dataset => dataset.id === byId('published_dataset').value);
+    if (!dataset) throw Error('Select a published dataset');
+    byId('published_preview').textContent = JSON.stringify(await api('preview', {
+        dataset: dataset.id, fields: dataset.columns.slice(0, 5).map(column => column.name), limit: 5
+    }), null, 2);
+    status('Published dataset preview loaded');
+});
+action('create_participant', async () => {
+    const datasets = Array.from(byId('dataset_grants').querySelectorAll('input:checked'), input => input.value);
+    const result = await api('participants/create', {revision, name: byId('participant_name').value.trim(), datasets});
+    byId('issued_token').textContent = result.token; byId('issued_token_panel').hidden = false;
+    byId('participant_test_token').value = result.token;
+    revision = result.revision; await reloadPublished();
+    status('Participant active. Copy the token now; it is shown only once.');
+});
+action('copy_participant_token', async () => {
+    await navigator.clipboard.writeText(byId('issued_token').textContent); status('Participant token copied');
+});
+action('test_participant', async () => {
+    byId('participant_test_result').textContent = JSON.stringify(await api('participants/test', {
+        token: byId('participant_test_token').value
+    }), null, 2);
+    status('Participant token, dataset grant and read-only query passed');
+});
+
 grantHelp();
 </script></body></html>

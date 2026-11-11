@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 import anyio
@@ -14,10 +15,10 @@ from pydantic import Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 from .limits import RequestSizeLimit
 from .database import Database, connection_error_message
-from .models import Catalog, Connection, Model, Name, Participant, Query, State
+from .models import Catalog, Column, Connection, Dataset, Model, Name, Participant, Query, State
 from .query import compile_query
 from .storage import Store, atomic_write
-from .setup import SetupStore
+from .setup import SetupStore, object_key
 
 log = logging.getLogger("devlens_reporting")
 
@@ -53,6 +54,32 @@ class ObjectSave(Model):
     schema_name: Name
     object_name: Name
     columns: list[FieldRemark] = Field(max_length=1024)
+
+
+class PrepareDataset(Model):
+    revision: str
+    connection: Connection
+    schema_name: Name
+    object_name: Name
+    dataset_id: Name
+    description: str = Field(min_length=1, max_length=4000)
+    grain: str = Field(min_length=1, max_length=2000)
+    business_rules: list[str] = Field(default_factory=list, max_length=50)
+
+
+class ParticipantCreate(Model):
+    revision: str
+    name: Name
+    datasets: list[Name] = Field(min_length=1, max_length=100)
+
+
+class ParticipantRevoke(Model):
+    revision: str
+    name: Name
+
+
+class ParticipantTest(Model):
+    token: SecretStr
 
 
 def create_app(state_path: str | None = None, demo: bool | None = None) -> FastAPI:
@@ -175,10 +202,14 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         return FileResponse(Path(__file__).parent / "static" / "admin.html")
 
     @app.get("/admin/api/state")
-    def get_state():
+    def get_state(request: Request):
         state, revision = store.read()
+        public_host = next((host for host in hosts if not host.startswith(("127.", "localhost", "[::1]"))
+                            and "*" not in host), None)
+        endpoint = ("https://" + public_host if public_host else str(request.base_url).rstrip("/")) + "/mcp"
         return {"state": state.model_dump(), "revision": revision, "demo": database.demo,
                 "setup": setup.configuration(state.connection),
+                "mcp_url": endpoint,
                 "password_saved": password_path.exists() or bool(os.environ.get(state.connection.password_env))}
 
     @app.post("/admin/api/connection")
@@ -233,6 +264,93 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         except OSError:
             raise HTTPException(500, "The SQL password could not be saved") from None
         return {"status": "saved"}
+
+    @app.post("/admin/api/dataset/prepare")
+    async def prepare_dataset(body: PrepareDataset):
+        saved, revision = setup.read()
+        if revision != body.revision:
+            raise HTTPException(409, "Saved setup changed; reload the object before preparing")
+        if saved.get("connection") != body.connection.model_dump():
+            raise HTTPException(409, "Save SQL details before preparing the dataset")
+        dictionary = saved.get("objects", {}).get(object_key(body.connection, body.schema_name, body.object_name))
+        if not dictionary:
+            raise HTTPException(400, "Save field remarks for this object first")
+        try:
+            current = await run_in_threadpool(database.columns, body.connection, body.schema_name, body.object_name)
+        except Exception as error:
+            raise HTTPException(400, connection_error_message(error, "metadata")) from None
+        signature = lambda columns: {(c["name"], c["sql_type"], c["nullable"]) for c in columns}
+        if not current or signature(current) != signature(dictionary["columns"]):
+            raise HTTPException(409, "SQL metadata changed; reload the object and save its remarks again")
+        if len(current) > 100:
+            raise HTTPException(400, "A reporting dataset supports at most 100 columns")
+        types = {"text": {"char", "varchar", "nchar", "nvarchar", "text", "ntext", "uniqueidentifier", "xml"},
+                 "number": {"tinyint", "smallint", "int", "bigint", "decimal", "numeric", "money", "smallmoney", "float", "real"},
+                 "date": {"date", "datetime", "datetime2", "smalldatetime", "datetimeoffset", "time"},
+                 "boolean": {"bit"}}
+        columns = []
+        for column in dictionary["columns"]:
+            kind = next((kind for kind, names in types.items() if column["sql_type"].lower() in names), None)
+            if kind is None:
+                raise HTTPException(400, "Unsupported SQL type for column " + column["name"])
+            if not column.get("remarks", "").strip():
+                raise HTTPException(400, "Enter and save remarks for column " + column["name"])
+            columns.append(Column(name=column["name"], description=column["remarks"], kind=kind))
+        dataset = Dataset(id=body.dataset_id, schema_name=body.schema_name, object_name=body.object_name,
+                          description=body.description, grain=body.grain,
+                          business_rules=body.business_rules, columns=columns)
+        return {"dataset": dataset.model_dump(), "setup_revision": revision}
+
+    @app.post("/admin/api/participants/create")
+    def create_participant(body: ParticipantCreate):
+        state, revision = store.read()
+        if revision != body.revision:
+            raise HTTPException(409, "Published configuration changed; load it again")
+        if any(user.name == body.name for user in state.participants):
+            raise HTTPException(409, "Participant name already exists. Revoke it before replacing its token.")
+        if set(body.datasets) - {dataset.id for dataset in state.catalog.datasets}:
+            raise HTTPException(400, "Choose only published datasets")
+        if len(state.participants) >= 100:
+            raise HTTPException(400, "At most 100 participants are supported")
+        token = secrets.token_urlsafe(32)
+        state.participants.append(Participant(name=body.name, datasets=list(dict.fromkeys(body.datasets)),
+                                             token_sha256=hashlib.sha256(token.encode()).hexdigest()))
+        try:
+            revision = store.publish(state, revision)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+        return {"status": "active", "revision": revision, "token": token}
+
+    @app.post("/admin/api/participants/revoke")
+    def revoke_participant(body: ParticipantRevoke):
+        state, revision = store.read()
+        if revision != body.revision:
+            raise HTTPException(409, "Published configuration changed; load it again")
+        if not any(user.name == body.name for user in state.participants):
+            raise HTTPException(404, "Participant unavailable")
+        state.participants = [user for user in state.participants if user.name != body.name]
+        try:
+            revision = store.publish(state, revision)
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+        return {"status": "revoked", "revision": revision}
+
+    @app.post("/admin/api/participants/test")
+    async def test_participant(body: ParticipantTest):
+        state, _ = store.read()
+        supplied = Request({"type": "http", "headers": [
+            (b"authorization", ("Bearer " + body.token.get_secret_value()).encode("utf-8"))]})
+        user = participant(supplied, state)
+        datasets = [dataset for dataset in state.catalog.datasets if dataset.id in user.datasets]
+        if not datasets:
+            raise HTTPException(400, "Participant has no published dataset access")
+        dataset = datasets[0]
+        try:
+            result = await execute(state, user, Query(dataset=dataset.id,
+                                   fields=[column.name for column in dataset.columns[:5]], limit=3))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from None
+        return {"status": "passed", "participant": user.name, "datasets": user.datasets, "preview": result}
 
     @app.post("/admin/api/test")
     async def test_connection(body: Inspect):

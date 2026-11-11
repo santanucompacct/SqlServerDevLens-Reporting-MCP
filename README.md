@@ -2,7 +2,7 @@
 
 An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI clients discover approved datasets, read their business dictionary, and request bounded, parameterized SELECT queries. A private administration webpage manages the connection, published catalog and participant grants.
 
-**Version 0.2.0 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
+**Version 0.3.0 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
 
 ## Included in this version
 
@@ -99,7 +99,7 @@ Use synthetic examples in public issues and contributions. Customer catalogs, in
 SQL operations explicitly consume validation results and close cursors before closing connections, including truncated queries and errors. Reporting connections disable ODBC pooling to avoid reusing handles with pending results.
 
 
-## Guided SQL setup and field remarks (0.2.0)
+## Guided SQL setup and field remarks (0.3.0)
 
 Open the private administration page through the instance's SSH tunnel.
 
@@ -111,3 +111,19 @@ Open the private administration page through the instance's SSH tunnel.
 Private setup drafts are stored atomically in `setup.json` alongside the instance state with owner-only file permissions. No additional database service is required. Remarks are scoped to server, port, database, SQL username, schema and object. Schema refresh preserves remarks for existing column names and leaves new columns blank. A revision check rejects conflicting saves from another administrator. The SQL password remains in the separate protected `sql-password` file.
 
 Saving SQL details or field remarks does not change participant datasets or grants. The advanced dataset publishing and participant controls remain available below the setup workflow. A later publish activates the connection and catalog currently entered in those controls. Saving a password continues to replace the active instance password immediately.
+
+
+## Prepare, publish and test participant access (0.3.0)
+
+After selecting an object with saved field remarks, use the guided **Prepare and publish reporting dataset** section:
+
+1. Enter a dataset ID, business purpose, intended row level and reporting rules (one rule per line).
+2. Click **Prepare reporting dataset**. The server checks that saved metadata still matches SQL Server and converts saved remarks into column descriptions. All fields require saved nonblank remarks. Unsupported SQL types and more than 100 columns are rejected. Review and adjust the inferred reporting types.
+3. Review the publication impact, acknowledge it and click **Validate and publish dataset**. SQL connectivity and catalog column access are validated before atomic publication. Existing datasets and grants are retained. The initial example Sales dataset can be removed when it is the sole dataset and no participants exist. Publishing activates the current SQL connection for the whole instance.
+4. Use **Preview published dataset** for a small read-only sample.
+5. In **Participant access and connection**, enter a unique participant name, select published datasets and click **Create participant and activate token**. Copy the token once. Only its SHA-256 hash is stored. Revoke access from the participant table. Both changes take effect immediately and reject stale configuration revisions.
+6. **Test participant access** verifies the token and dataset grant and executes a small bounded query using the same authorization and query path as reporting tools. This is an internal service check, not verification of an external client connection. The MCP HTTP protocol is also covered by automated tests.
+
+Dataset grants allow all rows of the chosen dataset. They are not franchise-specific row security. For an external connection, use the displayed MCP endpoint and a participant bearer token with a compatible MCP client. OAuth/account linking is not implemented in this release. Administrator tokens must never be shared with reporting participants.
+
+Preparation leaves the published catalog unchanged until the administrator explicitly publishes. Prepared drafts are held in the page; re-prepare from saved remarks after a refresh. The advanced JSON controls remain available.

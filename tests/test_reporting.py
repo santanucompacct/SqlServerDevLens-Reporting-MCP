@@ -428,3 +428,82 @@ def test_setup_requires_admin_and_valid_fields(client):
     assert client.post('/admin/api/connection', headers=headers(), json={
         'connection': {}, 'revision': initial['setup']['revision']}).status_code == 400
     assert client.post('/admin/api/object', headers=headers(), json={'connection': {}}).status_code == 400
+
+
+def test_guided_publish_participant_access_and_revocation(client, state):
+    initial = client.get('/admin/api/state', headers=headers()).json()
+    connection = {**initial['setup']['connection'], 'server': 'synthetic', 'database': 'synthetic', 'username': 'reader'}
+    saved = client.post('/admin/api/connection', headers=headers(), json={
+        'revision': initial['setup']['revision'], 'connection': connection}).json()
+    body = {'connection': connection, 'schema_name': 'dbo', 'object_name': 'Sales'}
+    columns = client.post('/admin/api/object', headers=headers(), json=body).json()['columns']
+    saved = client.post('/admin/api/object/save', headers=headers(), json={**body,
+        'revision': saved['revision'], 'columns': [{'name': c['name'], 'remarks': 'Meaning of ' + c['name']} for c in columns]}).json()
+    prepare = {**body, 'revision': saved['revision'], 'dataset_id': 'franchise_reports',
+               'description': 'Franchise sales analysis', 'grain': 'One sales row',
+               'business_rules': ['Do not sum identifiers.']}
+    result = client.post('/admin/api/dataset/prepare', headers=headers(), json=prepare)
+    assert result.status_code == 200
+    dataset = result.json()['dataset']
+    assert dataset['columns'][2]['kind'] == 'number'
+    assert dataset['columns'][1]['kind'] == 'date'
+    assert dataset['columns'][2]['description'] == 'Meaning of amount'
+    assert client.get('/admin/api/state', headers=headers()).json()['state'] == initial['state']
+    draft = initial['state']
+    draft['connection'] = connection
+    draft['catalog'] = {'version': 'guided-test', 'datasets': [dataset]}
+    draft['participants'] = []
+    published = client.post('/admin/api/publish', headers=headers(), json={'state': draft, 'revision': initial['revision']})
+    assert published.status_code == 200
+    revision = published.json()['revision']
+    assert client.post('/admin/api/participants/create', headers=headers(), json={
+        'revision': revision, 'name': 'reader', 'datasets': ['unpublished']}).status_code == 400
+    created = client.post('/admin/api/participants/create', headers=headers(), json={
+        'revision': revision, 'name': 'reader', 'datasets': ['franchise_reports']})
+    assert created.status_code == 200
+    token = created.json()['token']
+    assert len(token) >= 32
+    assert token not in state.read_text()
+    loaded = client.get('/admin/api/state', headers=headers()).json()
+    assert token not in loaded.__str__()
+    assert client.post('/admin/api/participants/create', headers=headers(), json={
+        'revision': revision, 'name': 'other', 'datasets': ['franchise_reports']}).status_code == 409
+    assert client.post('/admin/api/participants/create', headers=headers(), json={
+        'revision': loaded['revision'], 'name': 'reader', 'datasets': ['franchise_reports']}).status_code == 409
+    checked = client.post('/admin/api/participants/test', headers=headers(), json={'token': token})
+    assert checked.status_code == 200
+    assert checked.json()['preview']['dataset'] == 'franchise_reports'
+    assert checked.json()['preview']['rows']
+    def call(name, arguments):
+        return client.post('/mcp', headers={**headers(token), 'Accept': 'application/json, text/event-stream'},
+            json={'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}})
+    described = call('describe_dataset', {'dataset': 'franchise_reports'})
+    assert described.status_code == 200 and 'Meaning of amount' in described.text
+    rows = call('query_dataset', {'query': {'dataset': 'franchise_reports', 'fields': ['customer', 'amount'], 'limit': 2}})
+    assert rows.status_code == 200 and 'Example A' in rows.text
+    revoked = client.post('/admin/api/participants/revoke', headers=headers(), json={'revision': loaded['revision'], 'name': 'reader'})
+    assert revoked.status_code == 200
+    assert call('list_datasets', {}).status_code == 401
+    assert client.post('/admin/api/participants/test', headers=headers(), json={'token': token}).status_code == 401
+
+
+def test_prepare_rejects_missing_dictionary_and_stale_metadata(client, monkeypatch):
+    from devlens_reporting.database import Database
+    initial = client.get('/admin/api/state', headers=headers()).json()
+    connection = {**initial['setup']['connection'], 'server': 'synthetic', 'database': 'synthetic', 'username': 'reader'}
+    saved = client.post('/admin/api/connection', headers=headers(), json={'revision': initial['setup']['revision'], 'connection': connection}).json()
+    body = {'connection': connection, 'schema_name': 'dbo', 'object_name': 'Sales'}
+    prepare = {**body, 'revision': saved['revision'], 'dataset_id': 'report', 'description': 'Report', 'grain': 'row'}
+    assert client.post('/admin/api/dataset/prepare', headers=headers(), json=prepare).status_code == 400
+    columns = client.post('/admin/api/object', headers=headers(), json=body).json()['columns']
+    saved = client.post('/admin/api/object/save', headers=headers(), json={**body, 'revision': saved['revision'],
+        'columns': [{'name': c['name'], 'remarks': ''} for c in columns]}).json()
+    prepare['revision'] = saved['revision']
+    assert 'remarks for column' in client.post('/admin/api/dataset/prepare', headers=headers(), json=prepare).text
+    prepare['revision'] = initial['setup']['revision']
+    assert client.post('/admin/api/dataset/prepare', headers=headers(), json=prepare).status_code == 409
+    prepare['revision'] = saved['revision']
+    monkeypatch.setattr(Database, 'columns', lambda *args: [{'name': 'changed', 'sql_type': 'int', 'nullable': False}])
+    assert client.post('/admin/api/dataset/prepare', headers=headers(), json=prepare).status_code == 409
+    for path in ['dataset/prepare', 'participants/create', 'participants/revoke', 'participants/test']:
+        assert client.post('/admin/api/' + path, json={}).status_code == 401
