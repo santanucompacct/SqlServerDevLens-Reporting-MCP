@@ -212,7 +212,6 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     environment = {**os.environ, 'DEVLENS_STATE': str(state), 'DEVLENS_DEMO': '1', 'DEVLENS_PORT': '8131',
                    'DEVLENS_ADMIN_TOKEN': admin_token, 'DEVLENS_OAUTH_ISSUER': issuer,
-                   'DEVLENS_OAUTH_REDIRECT_HOSTS': '127.0.0.1',
                    'DEVLENS_ALLOWED_HOSTS': 'reporting.test,localhost,127.0.0.1:*'}
     process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'devlens_reporting.app:create_app', '--factory',
                                 '--host', '127.0.0.1', '--port', '8131', '--ssl-keyfile', str(key), '--ssl-certfile', str(cert)],
@@ -226,7 +225,19 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                 except httpx.ConnectError:
                     pass
                 time.sleep(.1)
-            registration = api.post('/register', json={'redirect_uris': [redirect], 'token_endpoint_auth_method': 'none', 'client_name': 'Browser OAuth test'}).json()
+            registration_response = api.post('/register', json={'redirect_uris': ['https://chatgpt.com/connector_platform_oauth_redirect'],
+                'token_endpoint_auth_method': 'none', 'client_name': 'Browser OAuth test'})
+            assert registration_response.status_code == 201
+            registration = registration_response.json()
+            # Seed a local-only callback fixture, preserving the production DCR
+            # restriction to HTTPS port 443. The browser still follows the real
+            # cross-origin redirect over TLS, without interception or rewriting.
+            import sqlite3
+            with sqlite3.connect(state.parent / 'oauth.sqlite3') as db:
+                row = db.execute('SELECT metadata FROM clients WHERE id=?', (registration['client_id'],)).fetchone()
+                metadata = json.loads(row[0])
+                metadata['redirect_uris'] = [redirect]
+                db.execute('UPDATE clients SET metadata=? WHERE id=?', (json.dumps(metadata), registration['client_id']))
             verifier = secrets.token_urlsafe(48)
             challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
             params = {'client_id': registration['client_id'], 'redirect_uri': redirect, 'response_type': 'code',
