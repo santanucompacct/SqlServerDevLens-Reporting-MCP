@@ -222,3 +222,59 @@ def test_saved_password_odbc_escaping_and_environment_fallback(tmp_path, monkeyp
     assert "PWD=" + odbc_value(password) + ";" in captured[-1]
     assert "legacy-environment-password" not in captured[-1]
     assert "Encrypt=yes;TrustServerCertificate=no;" in captured[-1]
+
+
+@pytest.mark.parametrize("encrypt,trust", [(True, False), (True, True), (False, False), (False, True)])
+def test_sql_tls_settings_reach_odbc(encrypt, trust, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from devlens_reporting.database import Database
+    from devlens_reporting.models import Connection
+    captured = []
+    class FakeConnection:
+        timeout = 0
+        def close(self):
+            pass
+    def connect(dsn, **kwargs):
+        captured.append(dsn)
+        return FakeConnection()
+    monkeypatch.setitem(sys.modules, "pyodbc", SimpleNamespace(connect=connect))
+    monkeypatch.setenv("DEVLENS_SQL_PASSWORD", "synthetic-password")
+    settings = Connection(server="example", database="example", username="reader",
+                          encrypt=encrypt, trust_server_certificate=trust)
+    with Database().connect(settings):
+        pass
+    assert "Encrypt=" + ("yes" if encrypt else "no") + ";" in captured[0]
+    assert "TrustServerCertificate=" + ("yes" if trust else "no") + ";" in captured[0]
+
+
+def test_legacy_tls_defaults_and_diagnostic_redaction():
+    from devlens_reporting.models import Connection
+    from devlens_reporting.database import connection_error_message
+    settings = Connection.model_validate({"server": "example", "database": "example", "username": "reader"})
+    assert settings.encrypt is True
+    assert settings.trust_server_certificate is False
+    cases = [
+        (Exception("08001", "SSL Provider: certificate verify failed:self-signed certificate; secret=hidden"), "certificate validation failed"),
+        (Exception("28000", "Login failed for secret-user (18456)"), "SQL login failed"),
+        (Exception("42000", "Cannot open private-db (4060)"), "selected database"),
+        (Exception("42000", "SELECT permission denied on private-view (229)"), "SQL permission denied"),
+        (Exception("HYT00", "Login timeout expired for private-host"), "timed out"),
+        (Exception("08001", "TCP Provider could not reach private-host"), "could not be reached"),
+    ]
+    for error, expected in cases:
+        message = connection_error_message(error)
+        assert expected in message
+        assert not any(secret in message for secret in ["hidden", "secret-user", "private-db", "private-view", "private-host"])
+    assert "metadata inspection failed" in connection_error_message(Exception("unknown"), "metadata")
+
+
+def test_connection_error_is_actionable_and_redacted(client, monkeypatch):
+    from devlens_reporting.database import Database
+    def fail(self, settings, catalog):
+        raise Exception("08001", "SSL Provider: certificate verify failed; password=do-not-return")
+    monkeypatch.setattr(Database, "validate", fail)
+    result = client.post("/admin/api/test", headers=headers(), json={"connection": {"encrypt": True, "trust_server_certificate": False}})
+    assert result.status_code == 400
+    assert "certificate validation failed" in result.json()["detail"]
+    assert "do-not-return" not in result.text
