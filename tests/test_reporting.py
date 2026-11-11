@@ -292,3 +292,32 @@ def test_metadata_diagnostic_identifies_failure_without_provider_secrets(client,
     assert "ProgrammingError / SQLSTATE 42S22" in result.json()["detail"]
     assert "never-return" not in result.text
     assert "private-host" not in result.text
+
+
+
+def test_provider_diagnostic_redacts_used_password_and_connection_details(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from devlens_reporting.database import Database, RedactedDatabaseError, connection_error_message, odbc_value
+    from devlens_reporting.models import Connection
+    class Error(Exception):
+        pass
+    class FakeConnection:
+        timeout = 0
+        def close(self):
+            pass
+    monkeypatch.setitem(sys.modules, "pyodbc", SimpleNamespace(Error=Error, connect=lambda *args, **kwargs: FakeConnection()))
+    password = "old #;{}' password"
+    path = tmp_path / "sql-password"
+    path.write_bytes(password.encode())
+    settings = Connection(server="private-host", database="private-db", username="private-user")
+    with pytest.raises(RedactedDatabaseError) as result:
+        with Database(password_path=path).connect(settings):
+            path.write_bytes(b"replacement-password")
+            raise Error("HY000", "Driver busy with another command (0); host=private-host; user=private-user; database=private-db; PWD=" + odbc_value(password))
+    message = connection_error_message(result.value, "metadata")
+    assert "Driver busy with another command" in message
+    assert "Driver message" in message
+    assert "SQLSTATE HY000" in message
+    for value in [password, odbc_value(password), "private-host", "private-db", "private-user"]:
+        assert value not in message
