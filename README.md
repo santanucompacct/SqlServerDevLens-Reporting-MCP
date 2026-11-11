@@ -72,7 +72,7 @@ See [deploy/README.md](deploy/README.md), [systemd template](deploy/devlens-repo
 
 Several instance domains can point to one static public IP. Each hostname routes to its own loopback service port. Caddy can obtain and renew HTTPS certificates when DNS and certificate-validation connectivity are configured. Configure `DEVLENS_ALLOWED_HOSTS` to include each public hostname, retaining loopback host entries for administration. The server rejects browser Origin headers on MCP by default.
 
-The process reads its published state file on each request. State includes SQL connection metadata and participant token hashes, with secrets referenced through environment variables. Keep state and environment files outside the source checkout and restrict permissions. Participant list edits are published atomically; changes take effect on subsequent requests. An already-running query may finish after revocation.
+The process reads its published state manifest on each request. On publication, the data dictionary is saved as a separate immutable `catalog-<sha256>.json` beside that manifest. The manifest points to the current catalog and includes SQL connection metadata and participant token hashes, with secrets referenced through environment variables. Inline catalogs remain supported for initial setup. Back up the manifest together with its referenced catalog. Older catalog files remain available for operational history and can be pruned during maintenance after checking references. Keep state and environment files outside the source checkout and restrict permissions. Participant list edits are published atomically; changes take effect on subsequent requests. An already-running query may finish after revocation.
 
 ## Verification
 
@@ -80,7 +80,7 @@ The process reads its published state file on each request. State includes SQL c
 python -m pytest -q
 ```
 
-Ordinary tests use synthetic SQLite data while compiling SQL Server queries. CI also provisions a disposable SQL Server, installs Driver 18, and verifies real SELECT execution, exact decimal serialization and write denial under a restricted login. Its test-only adapter trusts the disposable SQL Server's self-signed certificate. Production connections always verify certificates. To run that integration test locally, set `TEST_SQL_SERVER=localhost,1433` and `TEST_SQL_SA_PASSWORD` for a fresh disposable SQL Server, then run `python -m pytest tests/test_sqlserver.py -q`. The fixture creates its own database and SQL login.
+Ordinary tests use synthetic SQLite data while compiling SQL Server queries. CI exercises the real admin webpage in Chromium and also provisions a disposable SQL Server, installs Driver 18, and verifies real SELECT execution, exact decimal serialization and write denial under a restricted login. Its test-only adapter trusts the disposable SQL Server's self-signed certificate. Production connections always verify certificates. To run that integration test locally, set `TEST_SQL_SERVER=localhost,1433` and `TEST_SQL_SA_PASSWORD` for a fresh disposable SQL Server, then run `python -m pytest tests/test_sqlserver.py -q`. The fixture creates its own database and SQL login.
 
 CI builds wheel and source archives as downloadable workflow artifacts. These builds are pilot packages. Customer database reconciliation and real ChatGPT/Gemini onboarding remain deployment acceptance checks.
 
