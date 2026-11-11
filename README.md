@@ -2,7 +2,7 @@
 
 An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI clients discover approved datasets, read their business dictionary, and request bounded, parameterized SELECT queries. A private administration webpage manages the connection, published catalog and participant grants.
 
-**Version 0.1.4 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
+**Version 0.1.5 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
 
 ## Included in this version
 
@@ -95,3 +95,5 @@ CI builds wheel and source archives as downloadable workflow artifacts. These bu
 | `.github/workflows/` | Test and package automation |
 
 Use synthetic examples in public issues and contributions. Customer catalogs, instance settings and test evidence belong in private deployment records. See [LICENSE](LICENSE).
+
+SQL operations explicitly consume validation results and close cursors before closing connections, including truncated queries and errors. Reporting connections disable ODBC pooling to avoid reusing handles with pending results.
