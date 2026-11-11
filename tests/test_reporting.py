@@ -163,3 +163,16 @@ def test_separate_catalog_and_failed_manifest_publish(state, monkeypatch):
     with pytest.raises(OSError):
         store.publish(model, new_revision)
     assert store.read()[0].catalog.version == 'separate-catalog'
+
+
+def test_hyphenated_instance_startup(state, monkeypatch):
+    value = json.loads(state.read_text())
+    value["instance"] = "lalbaba-instance"
+    state.write_text(json.dumps(value))
+    monkeypatch.setenv("DEVLENS_ADMIN_TOKEN", ADMIN)
+    with TestClient(create_app(str(state), demo=True), base_url="http://localhost") as client:
+        assert client.get("/health").status_code == 200
+        loaded = client.get("/admin/api/state", headers=headers()).json()
+        assert loaded["state"]["instance"] == "lalbaba-instance"
+    with pytest.raises(ValueError):
+        Query(dataset="sales", fields=["column-with-hyphen"])
