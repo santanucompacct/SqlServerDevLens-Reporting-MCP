@@ -37,6 +37,11 @@ def test_private_admin_workflow(tmp_path):
             page.locator("#token").fill(admin_token)
             page.locator("#load").click()
             page.wait_for_function("document.querySelector('#status').textContent === 'Loaded synthetic demo configuration'")
+            page.locator("#sql_password").fill("Synthetic password#;{}-123!")
+            page.locator("#save_password").click()
+            page.wait_for_function("document.querySelector('#status').textContent === 'SQL password saved. Test the connection next.'")
+            assert page.locator("#sql_password").input_value() == ""
+            assert (tmp_path / "sql-password").read_text() == "Synthetic password#;{}-123!"
             page.locator("#inspect").click()
             page.wait_for_function("document.querySelector('#status').textContent === 'Connection verified'")
             page.locator("#preview").click()
