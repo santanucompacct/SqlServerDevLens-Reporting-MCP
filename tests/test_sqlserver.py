@@ -38,7 +38,7 @@ def test_real_read_only_sql(monkeypatch):
         connection.execute(f"CREATE LOGIN DevLensReader WITH PASSWORD='{reader_password}'")
         connection.execute("CREATE USER DevLensReader FOR LOGIN DevLensReader")
         connection.execute("GRANT SELECT ON dbo.Sales TO DevLensReader")
-        connection.execute("DENY INSERT,UPDATE,DELETE ON dbo.Sales TO DevLensReader")
+        connection.execute("DENY INSERT,UPDATE,DELETE,EXECUTE,ALTER ON DATABASE::DevLensTest TO DevLensReader")
     finally:
         connection.close()
     monkeypatch.setenv("DEVLENS_SQL_PASSWORD", reader_password)
