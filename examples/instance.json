@@ -1,0 +1,42 @@
+{
+  "instance": "demo",
+  "connection": {},
+  "catalog": {
+    "version": "demo-1",
+    "datasets": [
+      {
+        "id": "sales",
+        "schema_name": "dbo",
+        "object_name": "Sales",
+        "description": "Synthetic sales for testing only",
+        "grain": "One row per synthetic sale",
+        "business_rules": [
+          "Amounts are synthetic. Sum amount for sales totals."
+        ],
+        "columns": [
+          {
+            "name": "customer",
+            "description": "Synthetic customer",
+            "kind": "text"
+          },
+          {
+            "name": "doc_date",
+            "description": "Invoice date",
+            "kind": "date"
+          },
+          {
+            "name": "amount",
+            "description": "Sale amount",
+            "kind": "number"
+          },
+          {
+            "name": "branch",
+            "description": "Sales branch",
+            "kind": "text"
+          }
+        ]
+      }
+    ]
+  },
+  "participants": []
+}
