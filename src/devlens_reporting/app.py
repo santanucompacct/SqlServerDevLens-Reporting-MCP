@@ -13,7 +13,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import SecretStr
 from starlette.concurrency import run_in_threadpool
 from .limits import RequestSizeLimit
-from .database import Database
+from .database import Database, connection_error_message
 from .models import Catalog, Connection, Model, Name, Participant, Query, State
 from .query import compile_query
 from .storage import Store, atomic_write
@@ -172,15 +172,17 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
 
     @app.post("/admin/api/test")
     async def test_connection(body: Inspect):
+        stage = "connection"
         try:
             await run_in_threadpool(database.validate, body.connection, Catalog(version="test"))
+            stage = "metadata"
             objects = await run_in_threadpool(database.objects, body.connection)
             columns = []
             if body.schema_name and body.object_name:
                 columns = await run_in_threadpool(database.columns, body.connection, body.schema_name, body.object_name)
-            return {"status": "ok", "objects": objects, "columns": columns}
-        except Exception:
-            raise HTTPException(400, "Connection or metadata inspection failed; verify SQL settings, TLS and permissions") from None
+            return {"status": "ok", "demo": database.demo, "objects": objects, "columns": columns}
+        except Exception as error:
+            raise HTTPException(400, connection_error_message(error, stage)) from None
 
     @app.post("/admin/api/publish")
     async def publish(body: Publish):
