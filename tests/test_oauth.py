@@ -81,7 +81,7 @@ def authorize(client, registration):
     verifier, page = begin(client, registration)
     assert page.cookies.get(COOKIE)
     assert 'Secure' in page.headers['set-cookie'] and 'HttpOnly' in page.headers['set-cookie']
-    assert page.headers['referrer-policy'] == 'no-referrer'
+    assert page.headers['referrer-policy'] == 'same-origin'
     page = login(client, page)
     assert page.status_code == 200, page.text
     assert 'tester' in page.text and '<li>sales</li>' in page.text

@@ -349,7 +349,7 @@ class OAuthProvider:
         document = ("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
                     "<title>DevLens Reporting authorization</title><style>body{font:16px system-ui;background:#f3f6fa;color:#172b43;max-width:650px;margin:40px auto;padding:20px}"
                     "main{background:white;padding:28px;border-radius:12px;border:1px solid #dce5ef}p{line-height:1.6;overflow-wrap:anywhere}input,button{font:inherit;padding:12px;box-sizing:border-box}"
-                    "input{display:block;width:100%;margin:8px 0 16px}button{background:#145d9d;color:white;border:0;border-radius:6px;margin:8px 8px 0 0;cursor:pointer}small{color:#526477}"
+                    "input{display:block;width:100%;margin:8px 0 16px}button{max-width:100%;background:#145d9d;color:white;border:0;border-radius:6px;margin:8px 8px 0 0;cursor:pointer}small{color:#526477}"
                     ".error{color:#96331c}</style></head><body><main><h1>DevLens Reporting</h1><p>Instance: " + esc(self.issuer) +
                     "</p><p>Application: <strong>" + esc(client_name) + "</strong><br><small>This name is supplied by the client.</small></p><p>Return address: " +
                     esc(str(params.redirect_uri)) + "</p><p class='error' role='alert'>" + esc(message) + "</p>"
@@ -359,7 +359,7 @@ class OAuthProvider:
                     "<p><small>Access tokens expire after one hour. A refresh grant lasts at most 30 days and can be revoked by your administrator."
                     " Your participant token is not passed to the connecting application.</small></p></main></body></html>")
         response = HTMLResponse(document, status_code=status, headers={
-            "Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "no-referrer",
+            "Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "same-origin",
             "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
         response.set_cookie(COOKIE, csrf, secure=True, httponly=True, samesite="lax", max_age=600, path="/")

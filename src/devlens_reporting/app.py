@@ -234,7 +234,7 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         if oauth and path in oauth_cors_paths:
             response.headers["Access-Control-Allow-Origin"] = "*"
         if oauth and (path in oauth_cors_paths or path.startswith("/oauth/") or path == "/authorize"):
-            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
         return response
 
     @app.get("/health")
