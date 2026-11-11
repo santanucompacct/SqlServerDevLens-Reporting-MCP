@@ -13,6 +13,25 @@ def odbc_value(value: str) -> str:
     return "{" + value.replace("}", "}}") + "}"
 
 
+class RedactedDatabaseError(Exception):
+    """Provider diagnostic with the password used for this connection removed."""
+    def __init__(self, error: Exception, password: str, settings: Connection):
+        values = [str(value) for value in getattr(error, "args", ())]
+        message = " | ".join(values)
+        variants = {password, odbc_value(password), password.replace("}", "}}"),
+                    password.replace("'", "''"), password.encode("unicode_escape").decode("ascii")}
+        variants.update({settings.server, settings.database, settings.username})
+        for secret in sorted(variants, key=len, reverse=True):
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        message = re.sub(r"(?i)\b(?:PWD|PASSWORD)\s*=\s*(?:\{(?:[^}]|}})*\}|[^;\r\n]*)",
+                         "PWD=[redacted]", message)
+        self.safe_provider_detail = message[:2000]
+        self.provider_error_type = getattr(error, "provider_error_type", type(error).__name__)
+        state = values[0] if values and re.fullmatch(r"[A-Z0-9]{5}", values[0]) else "HY000"
+        super().__init__(state, self.safe_provider_detail)
+
+
 class Database:
     def __init__(self, demo: bool = False, password_path: Path | None = None):
         self.demo = demo
@@ -39,19 +58,30 @@ class Database:
             if not all((settings.server, settings.database, settings.username, password)):
                 raise ValueError("SQL settings or saved password are missing")
             server = f"tcp:{settings.server},{settings.port}"
-            connection = pyodbc.connect(
-                "DRIVER={ODBC Driver 18 for SQL Server};"
-                f"SERVER={odbc_value(server)};DATABASE={odbc_value(settings.database)};"
-                f"UID={odbc_value(settings.username)};PWD={odbc_value(password)};"
-                f"Encrypt={'yes' if settings.encrypt else 'no'};"
-                f"TrustServerCertificate={'yes' if settings.trust_server_certificate else 'no'};"
-                "ApplicationIntent=ReadOnly;"
-                "APP=DevLensReporting;", timeout=10, autocommit=True)
-            connection.timeout = 20
+            connection = None
+            try:
+                connection = pyodbc.connect(
+                    "DRIVER={ODBC Driver 18 for SQL Server};"
+                    f"SERVER={odbc_value(server)};DATABASE={odbc_value(settings.database)};"
+                    f"UID={odbc_value(settings.username)};PWD={odbc_value(password)};"
+                    f"Encrypt={'yes' if settings.encrypt else 'no'};"
+                    f"TrustServerCertificate={'yes' if settings.trust_server_certificate else 'no'};"
+                    "ApplicationIntent=ReadOnly;"
+                    "APP=DevLensReporting;", timeout=10, autocommit=True)
+                connection.timeout = 20
+            except pyodbc.Error as error:
+                if connection is not None:
+                    connection.close()
+                raise RedactedDatabaseError(error, password, settings) from None
         try:
-            yield connection
-        finally:
-            connection.close()
+            try:
+                yield connection
+            finally:
+                connection.close()
+        except Exception as error:
+            if self.demo or not isinstance(error, pyodbc.Error):
+                raise
+            raise RedactedDatabaseError(error, password, settings) from None
 
     def validate(self, settings: Connection, catalog: Catalog):
         with self.connect(settings) as connection:
@@ -158,7 +188,9 @@ def connection_error_message(error: Exception, stage: str = "connection") -> str
         if error_type not in allowed_types:
             error_type = "Error"
         sqlstate = state if re.fullmatch(r"[A-Z0-9]{5}", state) else "unavailable"
-        return ("SQL connection opened, but metadata inspection failed. "
-                f"Diagnostic {error_type} / SQLSTATE {sqlstate}. "
-                "Share this diagnostic code with the administrator.")
+        message = ("SQL connection opened, but metadata inspection failed. "
+                   f"Diagnostic {error_type} / SQLSTATE {sqlstate}.")
+        if isinstance(error, RedactedDatabaseError):
+            message += " Driver message " + error.safe_provider_detail
+        return message
     return "SQL connection failed. Check authentication, database access, network connectivity and TLS settings."
