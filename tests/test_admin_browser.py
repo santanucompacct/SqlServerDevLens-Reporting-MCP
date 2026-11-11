@@ -1,3 +1,4 @@
+import sys
 """Exercise the actual private webpage in the optional browser CI job."""
 import os
 from pathlib import Path
@@ -189,7 +190,7 @@ def test_guided_publishing_and_participant_ui(tmp_path):
 
 
 def test_oauth_consent_and_admin_session_revocation(tmp_path):
-    """Use an intercepted HTTPS origin to exercise Secure cookies without a test CA."""
+    """Exercise real HTTPS and Secure cookies with a disposable self-signed certificate."""
     import base64
     import hashlib
     import json
@@ -202,13 +203,20 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
     value['participants'] = [{'name': 'oauth_tester', 'token_sha256': hashlib.sha256(participant_token.encode()).hexdigest(), 'datasets': ['sales']}]
     state.write_text(json.dumps(value))
     admin_token = 'synthetic-browser-oauth-admin-123456789012345'
-    issuer, local, redirect = 'https://reporting.test', 'http://127.0.0.1:8131', 'https://chatgpt.com/connector_platform_oauth_redirect'
+    issuer = local = 'https://localhost:8131'
+    redirect = 'https://chatgpt.com/connector_platform_oauth_redirect'
+    key, cert = tmp_path / 'tls.key', tmp_path / 'tls.crt'
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                    '-keyout', str(key), '-out', str(cert), '-subj', '/CN=localhost'],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     environment = {**os.environ, 'DEVLENS_STATE': str(state), 'DEVLENS_DEMO': '1', 'DEVLENS_PORT': '8131',
                    'DEVLENS_ADMIN_TOKEN': admin_token, 'DEVLENS_OAUTH_ISSUER': issuer,
                    'DEVLENS_ALLOWED_HOSTS': 'reporting.test,localhost,127.0.0.1:*'}
-    process = subprocess.Popen(['devlens-reporting'], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'devlens_reporting.app:create_app', '--factory',
+                                '--host', '127.0.0.1', '--port', '8131', '--ssl-keyfile', str(key), '--ssl-certfile', str(cert)],
+                               env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        with httpx.Client(base_url=local, trust_env=False) as api:
+        with httpx.Client(base_url=local, trust_env=False, verify=False) as api:
             for _ in range(100):
                 try:
                     if api.get('/health').status_code == 200:
@@ -224,30 +232,21 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                       'state': 'browser-state', 'resource': issuer + '/mcp'}
             with sync_playwright() as driver:
                 browser = driver.chromium.launch(executable_path=os.environ.get('DEVLENS_CHROMIUM'))
-                page = browser.new_page()
+                page = browser.new_page(ignore_https_errors=True)
                 errors, callbacks = [], []
                 page.on('pageerror', lambda error: errors.append(str(error)))
-                def proxy(route):
-                    upstream = local + urlsplit(route.request.url).path
-                    if urlsplit(route.request.url).query:
-                        upstream += '?' + urlsplit(route.request.url).query
-                    response = route.fetch(url=upstream, max_redirects=0)
-                    # Redirected requests bypass Playwright route interception.
-                    # Resolve internal redirects explicitly while preserving the
-                    # browser's HTTPS origin and Secure-cookie behavior.
+                def consent(route):
+                    if route.request.method != 'POST':
+                        route.continue_()
+                        return
+                    response = route.fetch(max_redirects=0)
                     location = response.headers.get('location', '')
-                    if response.status in (302, 303) and location.startswith(issuer + '/'):
-                        response = route.fetch(url=local + location[len(issuer):], method='GET', post_data=None, max_redirects=0)
-                    elif response.status in (302, 303) and location.startswith(redirect + '?'):
+                    if response.status == 302 and location.startswith(redirect + '?'):
                         callbacks.append(location)
                         route.fulfill(status=200, content_type='text/html', body='<p>OAuth callback received</p>')
-                        return
-                    route.fulfill(response=response)
-                page.route(issuer + '/**', proxy)
-                def callback(route):
-                    callbacks.append(route.request.url)
-                    route.fulfill(status=200, content_type='text/html', body='<p>OAuth callback received</p>')
-                page.route(redirect + '**', callback)
+                    else:
+                        route.fulfill(response=response)
+                page.route(issuer + '/oauth/consent**', consent)
                 page.goto(issuer + '/authorize?' + urlencode(params))
                 page.get_by_label('Participant token', exact=True).fill(participant_token)
                 page.get_by_role('button', name='Continue', exact=True).click()
