@@ -1,7 +1,7 @@
 """Real SQL Server regression, opt-in through TEST_SQL_SERVER.
 
-The disposable CI SQL Server uses a self-signed TLS certificate. The test-only
-adapter trusts that certificate; production code always verifies TLS.
+The disposable SQL Server uses a self-signed certificate. Verify default trust
+rejection and explicit certificate-trust selection through the real driver.
 """
 import os
 import time
@@ -42,20 +42,18 @@ def test_real_read_only_sql(monkeypatch):
     finally:
         connection.close()
     monkeypatch.setenv("DEVLENS_SQL_PASSWORD", reader_password)
-    original_connect = pyodbc.connect
-
-    def local_tls(dsn, **kwargs):
-        return original_connect(dsn.replace("TrustServerCertificate=no", "TrustServerCertificate=yes"), **kwargs)
-
-    monkeypatch.setattr(pyodbc, "connect", local_tls)
     host, port = server.split(",")
-    settings = Connection(server=host, port=int(port), database="DevLensTest", username="DevLensReader")
+    settings = Connection(server=host, port=int(port), database="DevLensTest", username="DevLensReader",
+                          trust_server_certificate=True)
     catalog = Catalog.model_validate({"version": "sql-test", "datasets": [{"id": "sales", "object_name": "Sales",
         "description": "Synthetic SQL fixture", "grain": "sale", "columns": [
             {"name": "customer", "description": "customer", "kind": "text"},
             {"name": "amount", "description": "amount", "kind": "number"}]}]})
     database = Database()
+    with pytest.raises(pyodbc.Error):
+        database.validate(settings.model_copy(update={"trust_server_certificate": False}), catalog)
     database.validate(settings, catalog)
+    database.validate(settings.model_copy(update={"encrypt": False}), Catalog(version="optional-tls"))
     assert any(o["object"] == "Sales" for o in database.objects(settings))
     query = Query(dataset="sales", group_by=["customer"], measures=[{"column": "amount", "function": "sum", "alias": "total"}])
     sql, values = compile_query(catalog.datasets[0], query)
