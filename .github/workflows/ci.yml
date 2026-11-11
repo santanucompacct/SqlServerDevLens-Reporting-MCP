@@ -46,3 +46,15 @@ jobs:
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
       - run: python -m pip install '.[test]'
       - run: python -m pytest tests/test_sqlserver.py -q
+  browser:
+    runs-on: ubuntu-24.04
+    env:
+      DEVLENS_BROWSER_TEST: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install '.[test]' playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest tests/test_admin_browser.py -q
