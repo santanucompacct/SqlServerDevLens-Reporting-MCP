@@ -7,3 +7,6 @@ build/
 dist/
 .env
 state/
+
+# Instance-local SQL credential file
+sql-password
