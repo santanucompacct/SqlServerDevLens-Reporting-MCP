@@ -240,6 +240,7 @@ def test_oauth_consent_and_admin_session_revocation(tmp_path):
                         route.continue_()
                         return
                     response = route.fetch(max_redirects=0)
+                    assert response.status in (200, 302), {'status': response.status, 'body': response.text(), 'origin': route.request.headers.get('origin'), 'cookie_present': bool(route.request.headers.get('cookie'))}
                     location = response.headers.get('location', '')
                     if response.status == 302 and location.startswith(redirect + '?'):
                         callbacks.append(location)
