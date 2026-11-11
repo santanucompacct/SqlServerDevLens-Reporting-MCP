@@ -43,7 +43,9 @@ class Database:
                 "DRIVER={ODBC Driver 18 for SQL Server};"
                 f"SERVER={odbc_value(server)};DATABASE={odbc_value(settings.database)};"
                 f"UID={odbc_value(settings.username)};PWD={odbc_value(password)};"
-                "Encrypt=yes;TrustServerCertificate=no;ApplicationIntent=ReadOnly;"
+                f"Encrypt={'yes' if settings.encrypt else 'no'};"
+                f"TrustServerCertificate={'yes' if settings.trust_server_certificate else 'no'};"
+                "ApplicationIntent=ReadOnly;"
                 "APP=DevLensReporting;", timeout=10, autocommit=True)
             connection.timeout = 20
         try:
@@ -117,3 +119,37 @@ class Database:
                     raise ValueError("Result exceeds 2 MB; narrow the query")
                 rows.append(result)
             return rows[:limit], len(rows) > limit
+
+
+
+def connection_error_message(error: Exception, stage: str = "connection") -> str:
+    """Classify provider errors without returning hostnames, credentials or raw messages."""
+    if isinstance(error, ValueError):
+        return "Enter the SQL server, database and username, and save the SQL password."
+    arguments = getattr(error, "args", ())
+    details = " ".join(str(value) for value in arguments)
+    lowered = details.lower()
+    state = str(arguments[0]) if arguments else ""
+    codes = set(re.findall(r"\((\d+)\)", details))
+    if "18456" in codes or state == "28000":
+        return "SQL login failed. Verify the username, password and SQL authentication access (18456/28000)."
+    if "4060" in codes:
+        return "The selected database could not be opened. Verify its name and login access (4060)."
+    if codes & {"229", "916"}:
+        return "SQL permission denied. Grant the reporting user access to the database and SELECT on the intended view."
+    certificate_errors = ("certificate verify failed", "certificate chain", "self-signed certificate",
+                          "hostname mismatch", "certificate subject name")
+    if any(marker in lowered for marker in certificate_errors):
+        return ("SQL TLS certificate validation failed. Check the SQL hostname and trusted CA, "
+                "or explicitly select Trust server certificate for a controlled connection test.")
+    if "ssl provider" in lowered or "tls" in lowered:
+        return "SQL TLS negotiation failed. Check SQL Server TLS support and the selected encryption settings."
+    if state in {"HYT00", "HYT01"} or "timeout" in lowered or "timed out" in lowered:
+        return "SQL connection timed out. Check the hostname, TCP port, firewall and server availability."
+    if state in {"08001", "08S01"}:
+        return "SQL Server could not be reached. Check the hostname, TCP port and network access from the reporting VM."
+    if state == "IM002":
+        return "Microsoft ODBC Driver 18 for SQL Server is unavailable on the reporting host."
+    if stage == "metadata":
+        return "SQL connection opened, but metadata inspection failed. Check object visibility and SELECT permissions."
+    return "SQL connection failed. Check authentication, database access, network connectivity and TLS settings."
