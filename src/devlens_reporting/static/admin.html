@@ -37,11 +37,16 @@
 <div class="fields"><label><span>Preview date field</span><select id="preview_date_column"></select></label><div class="fields"><label><span>From date</span><input id="preview_from" type="date"></label><label><span>To date (inclusive)</span><input id="preview_to" type="date"></label></div></div><small>For dated datasets, preview starts with the most recent seven calendar days. Narrow the range to avoid scanning the full view. Choose No date filter only when needed.</small>
 <button id="preview_dataset" disabled>Preview published dataset</button><pre id="published_preview"></pre>
 </section>
-<section><h2><span class="step">5</span>Participant access and connection</h2><p>Create a separate participant for each person or client. A participant can query every row in its selected datasets. These grants do not apply a franchise-specific row filter.</p>
+<section><h2><span class="step">5</span>Participant access and connection</h2>
+<h3>Connect with OAuth</h3><p id="oauth_status">Load the configuration to check OAuth availability.</p>
+<p>In ChatGPT, add this MCP endpoint and select <strong>OAuth</strong>. Use <strong>Dynamic Client Registration (DCR)</strong> if a client setup method is requested. No client ID or client secret needs to be copied manually. On the DevLens consent page, enter your participant token, review the allowed datasets, then choose Allow. Each user connects using their own participant token.</p>
+<button id="refresh_oauth" class="secondary" disabled>Refresh OAuth connections</button>
+<div class="grid-wrap"><table><thead><tr><th>Participant</th><th>Application</th><th>Datasets</th><th>Expires</th><th>Status</th><th>Action</th></tr></thead><tbody id="oauth_grants"></tbody></table></div>
+<h3>Create or manage participants</h3><p>Create a separate participant for each person or client. A participant can query every row in its selected datasets. These grants do not apply a franchise-specific row filter.</p>
 <label><span>Participant name</span><input id="participant_name" placeholder="santanu_reporting" maxlength="128"></label><fieldset><legend>Allowed published datasets</legend><div id="dataset_grants"></div></fieldset>
 <button id="create_participant" disabled>Create participant and activate token</button><div id="issued_token_panel" hidden><p>Copy this token now and share it privately. It cannot be retrieved later. The server stores its hash only.</p><pre id="issued_token"></pre><button id="copy_participant_token" class="secondary">Copy token</button></div>
 <div class="grid-wrap"><table><thead><tr><th>Participant</th><th>Allowed datasets</th><th>Action</th></tr></thead><tbody id="participant_rows"></tbody></table></div>
-<label><span>MCP endpoint</span><input id="mcp_endpoint" readonly></label><small>Authentication: Bearer token. Use the participant token, never the administrator token. OAuth/account linking is not implemented yet; the connecting client must support bearer-token MCP access.</small>
+<label><span>MCP endpoint</span><input id="mcp_endpoint" readonly></label><small>Authentication: Bearer token. Use the participant token, never the administrator token. For direct API/CLI connections, use a bearer token. For ChatGPT web, use OAuth as described above. This is DevLens participant sign-in, not Google or Microsoft single sign-on.</small>
 <label><span>Participant token to test</span><input id="participant_test_token" type="password" autocomplete="off"></label><button id="test_participant" disabled>Test participant access</button><small>This checks the token, dataset grant and a small read-only query on this server. It does not verify an external ChatGPT or Gemini account connection.</small><pre id="participant_test_result"></pre></section>
 <details class="advanced"><summary>Advanced: dataset publishing and participants</summary><p>Continue here when the field dictionary is ready. Saving field remarks above does not yet publish an allowed dataset.</p>
 <section><h2>Dataset dictionary</h2><p>Define approved objects, columns, row grain, business rules and documented relationships.</p><label>Catalog JSON <textarea id="catalog" rows="16" spellcheck="false"></textarea></label><button id="export">Download catalog JSON</button><label>Import catalog JSON <input type="file" id="import" accept="application/json"></label></section>
@@ -63,7 +68,7 @@ function populateObjects(objects){clearFields();const select=byId('object_select
 function updateButtons(){byId('save_connection').textContent=savedConnection?'Update SQL details':'Save SQL details';byId('inspect').disabled=!setupRevision||savedConnection!==connectionText()||busy;byId('save_fields').disabled=!selected||objectConnection!==connectionText()||busy;byId('prepare_dataset').disabled=!selected||dirty||savedConnection!==connectionText()||objectConnection!==connectionText()||busy;byId('publish_dataset').disabled=!prepared||!byId('publish_ack').checked||busy;byId('preview_dataset').disabled=!publishedState?.catalog.datasets.length||busy;byId('create_participant').disabled=!publishedState?.catalog.datasets.length||busy;byId('test_participant').disabled=!publishedState||busy;}
 function lockInputs(locked){for(const id of ['server','port','database','username','password_env','encrypt','trust_server_certificate','query_timeout_seconds','sql_password','dataset_id','dataset_description','dataset_grain','dataset_rules'])byId(id).disabled=locked;}
 function action(id,fn){byId(id).onclick=async()=>{if(busy)return;busy=true;lockInputs(true);byId(id).disabled=true;try{await fn()}catch(e){status(e.message,true)}finally{busy=false;lockInputs(false);byId(id).disabled=false;updateButtons()}}}
-action('load',async()=>{if(dirty&&!confirm('Discard unsaved field remarks and load the configuration?'))return;const result=await api('state');revision=result.revision;publishedState=result.state;renderPublished();byId('mcp_endpoint').value=result.mcp_url;byId('issued_token_panel').hidden=true;byId('issued_token').textContent='';byId('participant_test_token').value='';setupRevision=result.setup.revision;byId('instance').value=result.state.instance;for(const [key,value] of Object.entries(result.setup.connection)){if(typeof value==='boolean')byId(key).checked=value;else byId(key).value=value}savedConnection=result.setup.saved?connectionText():'';byId('connection_saved').textContent=result.setup.saved?'Saved SQL details loaded.':'Enter and save SQL details to continue.';byId('sql_password').value='';byId('password_saved').textContent=result.password_saved?'SQL password is saved on the server. Leave blank to keep it.':'No saved SQL password. Enter and save credentials below.';byId('catalog').value=JSON.stringify(result.state.catalog,null,2);byId('participants').value=JSON.stringify(result.state.participants,null,2);populateObjects(result.setup.objects);byId('save_connection').disabled=false;byId('save_password').disabled=false;status(result.demo?'Loaded synthetic demo configuration':'Loaded published configuration');});
+action('load',async()=>{if(dirty&&!confirm('Discard unsaved field remarks and load the configuration?'))return;const result=await api('state');revision=result.revision;publishedState=result.state;renderPublished();byId('mcp_endpoint').value=result.mcp_url;await refreshOAuth();byId('refresh_oauth').disabled=false;byId('issued_token_panel').hidden=true;byId('issued_token').textContent='';byId('participant_test_token').value='';setupRevision=result.setup.revision;byId('instance').value=result.state.instance;for(const [key,value] of Object.entries(result.setup.connection)){if(typeof value==='boolean')byId(key).checked=value;else byId(key).value=value}savedConnection=result.setup.saved?connectionText():'';byId('connection_saved').textContent=result.setup.saved?'Saved SQL details loaded.':'Enter and save SQL details to continue.';byId('sql_password').value='';byId('password_saved').textContent=result.password_saved?'SQL password is saved on the server. Leave blank to keep it.':'No saved SQL password. Enter and save credentials below.';byId('catalog').value=JSON.stringify(result.state.catalog,null,2);byId('participants').value=JSON.stringify(result.state.participants,null,2);populateObjects(result.setup.objects);byId('save_connection').disabled=false;byId('save_password').disabled=false;status(result.demo?'Loaded synthetic demo configuration':'Loaded published configuration');});
 action('save_connection',async()=>{if(!setupRevision)throw Error('Load the configuration first');const result=await api('connection',{revision:setupRevision,connection:connection()});setupRevision=result.revision;savedConnection=connectionText();byId('connection_saved').textContent='SQL details saved on the server.';status('SQL details saved. Test SQL to list objects.');});
 action('save_password',async()=>{if(!setupRevision)throw Error('Load the configuration first');await api('password',{password:byId('sql_password').value});byId('sql_password').value='';byId('password_saved').textContent='SQL password is saved on the server. Leave blank to keep it.';status('SQL password saved. Test the connection next.');});
 action('inspect',async()=>{if(savedConnection!==connectionText())throw Error('Save SQL details before testing');if(dirty&&!confirm('Discard unsaved field remarks and reload objects?'))return;populateObjects([]);byId('object_status').textContent='Connecting to SQL Server…';const result=await api('test',{connection:connection()});byId('metadata').textContent=JSON.stringify(result,null,2);populateObjects(result.objects);byId('object_status').textContent=result.objects.length+' visible object(s).'+(result.objects.length?' Select one to read its fields.':' Check the database and SELECT grants in the help below.');status(result.demo?'Demo metadata loaded (synthetic data)':'SQL connection verified');});
@@ -98,6 +103,7 @@ async function reloadPublished() {
     byId('catalog').value = JSON.stringify(result.state.catalog, null, 2);
     byId('participants').value = JSON.stringify(result.state.participants, null, 2);
     renderPublished();
+    await refreshOAuth();
 }
 function renderPublished() {
     const select = byId('published_dataset'), grants = byId('dataset_grants');
@@ -231,6 +237,33 @@ action('test_participant', async () => {
     }), null, 2);
     status('Participant token, dataset grant and read-only query passed');
 });
+
+
+async function refreshOAuth() {
+    const result = await api('oauth');
+    const rows = byId('oauth_grants'); rows.replaceChildren();
+    byId('oauth_status').textContent = result.enabled
+        ? 'OAuth is enabled for ' + result.issuer + '. Access tokens last one hour; refresh grants last at most 30 days.'
+        : 'OAuth is not enabled on this server. Ask the administrator to configure the public issuer URL.';
+    for (const grant of result.grants) {
+        const row = document.createElement('tr');
+        for (const value of [grant.participant, grant.client_name, grant.datasets.join(', '),
+                new Date(grant.expires * 1000).toLocaleString(), grant.active ? 'Active' : 'Revoked or inactive']) {
+            const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+        }
+        const cell = document.createElement('td'), button = document.createElement('button');
+        button.textContent = 'Revoke OAuth access'; button.className = 'secondary'; button.disabled = !grant.active;
+        button.onclick = async () => {
+            if (busy || !confirm('Revoke this OAuth connection for ' + grant.participant + '?')) return;
+            busy = true; button.disabled = true;
+            try { await api('oauth/revoke', {grant_id: grant.id}); await refreshOAuth(); status('OAuth connection revoked'); }
+            catch (error) { status(error.message, true); }
+            finally { busy = false; updateButtons(); }
+        };
+        cell.append(button); row.append(cell); rows.append(row);
+    }
+}
+action('refresh_oauth', async () => { await refreshOAuth(); status('OAuth connections refreshed'); });
 
 grantHelp();
 </script></body></html>

@@ -2,13 +2,13 @@
 
 An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI clients discover approved datasets, read their business dictionary, and request bounded, parameterized SELECT queries. A private administration webpage manages the connection, published catalog and participant grants.
 
-**Version 0.3.0 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
+**Version 0.4.0 is an implementation for pilot evaluation, including OAuth for remote MCP clients.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
 
 ## Included in this version
 
 - One independent SQL connection and catalog per process. Run several processes as separate Linux service instances.
 - Streamable HTTP MCP at `/mcp` with `list_datasets`, `describe_dataset` and `query_dataset`.
-- Individual bearer tokens stored as SHA-256 hashes, with explicit dataset grants and revocation on the next request.
+- Participant bearer tokens stored as SHA-256 hashes, plus optional OAuth authorization-code + PKCE, rotating refresh tokens and linked-session revocation. Dataset grants remain the access boundary.
 - Private `/admin` webpage for connection setup/testing, table/view discovery, column inspection, JSON dictionary import/export, participant token generation, schema validation and publishing.
 - Atomic configuration publication with revision checks. Local browser edits remain drafts until publication succeeds. Drafts are lost when the page closes unless exported.
 - Detail rows, filtered results, grouped totals, single metrics, and time series through grouping on an existing date/bucket column. Use views to define month buckets and business calculations.
@@ -17,7 +17,7 @@ An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI 
 
 The initial query API operates on one dataset per call. Relationships are documented metadata. Build reporting views for joins and calculated fields. Clients can make several calls for a summary and supporting detail. Each result reports its catalog version, query filters and truncation state. Separate calls may observe different data. Truncated results require a narrower query or SQL aggregation; result paging is planned.
 
-OAuth, delegated identity, company/branch row restrictions, an admin portal that provisions processes, and multi-result snapshots are future work. Dataset grants are the access boundary in this release. Publish different scoped views/datasets for participants who require different row access. Host support for bearer tokens, remote MCP and custom apps varies. Verify the intended ChatGPT or Gemini client before a rollout. This release does not claim account-level compatibility testing.
+External identity-provider single sign-on, company/branch row restrictions, an admin portal that provisions processes, and multi-result snapshots are future work. Dataset grants are the access boundary in this release. Publish different scoped views/datasets for participants who require different row access. Host support for bearer tokens, remote MCP and custom apps varies. Verify the intended ChatGPT or Gemini client before a rollout. This release does not claim account-level compatibility testing.
 
 ## Try locally with synthetic data
 
@@ -52,11 +52,11 @@ The admin preview accepts this query. All examples use synthetic names and figur
 }
 ```
 
-MCP `query_dataset` takes this object under the argument `query`. Detail queries use `fields`; aggregate queries use `group_by` and `measures`. Supported measures are sum, avg, min, max and non-null count of a column. Filters combine with AND and support eq, ne, gt, gte, lt, lte, is_null and is_not_null. Ordering is ascending. Monetary SQL decimals are returned as exact strings. Maximum row count is 1000, maximum checked result size is 2 MB, maximum text cell length is 16000 characters, and maximum request size is 256 KiB. Limits protect response handling; query cost also depends on indexes, the source views and data volume. ODBC query timeout is 20 seconds and connection timeout is 10 seconds.
+MCP `query_dataset` takes this object under the argument `query`. Detail queries use `fields`; aggregate queries use `group_by` and `measures`. Supported measures are sum, avg, min, max and non-null count of a column. Filters combine with AND and support eq, ne, gt, gte, lt, lte, is_null and is_not_null. Ordering is ascending. Monetary SQL decimals are returned as exact strings. Maximum row count is 1000, maximum checked result size is 2 MB, maximum text cell length is 16000 characters, and maximum request size is 256 KiB. Limits protect response handling; query cost also depends on indexes, the source views and data volume. ODBC query timeout defaults to 60 seconds (configurable up to 120); connection timeout is 10 seconds.
 
 ## Connect a real SQL Server
 
-Install [Microsoft ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server) on the Linux host. Disable demo mode by removing `DEVLENS_DEMO` from the environment. Configure the SQL hostname, port, database, SQL username and password environment-variable name through `/admin`. Enter the actual password in the separate **SQL password** field and click **Save SQL password**, then test the connection. Special characters, spaces and Unicode are supported. Saving immediately replaces this instance's active password. The password is stored in a separate mode-0600 `sql-password` file beside the state manifest and is read on each connection. Include that protected file in deployment backups. It takes precedence over the environment fallback. Existing `DEVLENS_SQL_PASSWORD` configurations continue to work when a saved password file is absent. The advanced password environment field contains a variable name such as `DEVLENS_SQL_PASSWORD`.
+Install [Microsoft ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server) on the Linux host. Disable demo mode by removing `DEVLENS_DEMO` from the environment. Configure the SQL hostname, port, database, SQL username and password environment-variable name through `/admin`. Enter the actual password in the separate **SQL password** field and click **Save SQL credentials**, then test the connection. Special characters, spaces and Unicode are supported. Saving immediately replaces this instance's active password. The password is stored in a separate mode-0600 `sql-password` file beside the state manifest and is read on each connection. Include that protected file in deployment backups. It takes precedence over the environment fallback. Existing `DEVLENS_SQL_PASSWORD` configurations continue to work when a saved password file is absent. The advanced password environment field contains a variable name such as `DEVLENS_SQL_PASSWORD`.
 
 SQL TLS settings match the original DevLens defaults. **Encrypt SQL connection** defaults on and **Trust server certificate** defaults off. Both options are available in the admin page and are saved with the connection. Use a hostname matching the SQL certificate and a trusted issuing CA. Selecting Trust server certificate skips server identity verification, so use it for controlled connection testing. Turning encryption off selects ODBC Optional mode, where the SQL server can still require encryption. These settings apply to the connection from the reporting service to SQL Server. Public MCP HTTPS is configured separately by Caddy. `ApplicationIntent=ReadOnly` is a connection preference. Enforce permissions with a dedicated SQL principal granted SELECT only on approved reporting objects. Avoid db_owner, db_datareader and inherited broad grants. Configure and verify that SQL identity separately through your database administration process.
 
@@ -68,9 +68,9 @@ The server generates SQL from validated identifiers and approved operations. Cli
 
 Use one configuration file, protected environment file, service identity and loopback port per instance. A shared code installation can serve several independent instances. Each process has its own query limits and SQL identity. Run one worker per instance because the publication lock is process-local.
 
-See [deploy/README.md](deploy/README.md), [systemd template](deploy/devlens-reporting@.service), [environment template](deploy/instance.env.example), and [Caddy template](deploy/Caddyfile.example). The service binds to loopback. Access the administrator page through a VPN or SSH tunnel. Expose only `/mcp` through the reverse proxy.
+See [deploy/README.md](deploy/README.md), [systemd template](deploy/devlens-reporting@.service), [environment template](deploy/instance.env.example), and [Caddy template](deploy/Caddyfile.example). The service binds to loopback. Access the administrator page through a VPN or SSH tunnel. Expose `/mcp` and only the explicit OAuth endpoints in the Caddy template through the reverse proxy. Keep `/admin` private.
 
-Several instance domains can point to one static public IP. Each hostname routes to its own loopback service port. Caddy can obtain and renew HTTPS certificates when DNS and certificate-validation connectivity are configured. Configure `DEVLENS_ALLOWED_HOSTS` to include each public hostname, retaining loopback host entries for administration. The server rejects browser Origin headers on MCP by default.
+Several instance domains can point to one static public IP. Each hostname routes to its own loopback service port. Caddy can obtain and renew HTTPS certificates when DNS and certificate-validation connectivity are configured. Configure `DEVLENS_ALLOWED_HOSTS` to include each public hostname, retaining loopback host entries for administration. The server rejects unapproved browser Origin headers on MCP. OAuth-enabled instances allow their own issuer origin and the ChatGPT/Gemini origins.
 
 The process reads its published state manifest on each request. On publication, the data dictionary is saved as a separate immutable `catalog-<sha256>.json` beside that manifest. The manifest points to the current catalog and includes SQL connection metadata and participant token hashes, with secrets referenced through environment variables. Inline catalogs remain supported for initial setup. Back up the manifest together with its referenced catalog. Older catalog files remain available for operational history and can be pruned during maintenance after checking references. Keep state and environment files outside the source checkout and restrict permissions. Participant list edits are published atomically; changes take effect on subsequent requests. An already-running query may finish after revocation.
 
@@ -80,7 +80,7 @@ The process reads its published state manifest on each request. On publication, 
 python -m pytest -q
 ```
 
-Ordinary tests use synthetic SQLite data while compiling SQL Server queries. CI exercises the real admin webpage in Chromium and also provisions a disposable SQL Server, installs Driver 18, and verifies real SELECT execution, exact decimal serialization and write denial under a restricted login. The integration test verifies rejection of the disposable SQL Server's self-signed certificate under default settings, then tests explicit certificate trust and optional encryption using the actual driver. Connection-test failures are categorized as TLS, login, database access, timeout, network or metadata errors with password-redacted provider details available only in the private administrator connection test. The password used for the failed operation and configured connection identity fields are removed before the diagnostic is returned. To run that integration test locally, set `TEST_SQL_SERVER=localhost,1433` and `TEST_SQL_SA_PASSWORD` for a fresh disposable SQL Server, then run `python -m pytest tests/test_sqlserver.py -q`. The fixture creates its own database and SQL login.
+Ordinary tests use synthetic SQLite data while compiling SQL Server queries. CI exercises the real admin and consent webpages in Chrome/Chromium and also provisions a disposable SQL Server using the official Driver 18 libraries from its image, and verifies real SELECT execution, exact decimal serialization and write denial under a restricted login. The integration test verifies rejection of the disposable SQL Server's self-signed certificate under default settings, then tests explicit certificate trust and optional encryption using the actual driver. Connection-test failures are categorized as TLS, login, database access, timeout, network or metadata errors with password-redacted provider details available only in the private administrator connection test. The password used for the failed operation and configured connection identity fields are removed before the diagnostic is returned. To run that integration test locally, set `TEST_SQL_SERVER=localhost,1433` and `TEST_SQL_SA_PASSWORD` for a fresh disposable SQL Server, then run `python -m pytest tests/test_sqlserver.py -q`. The fixture creates its own database and SQL login.
 
 CI builds wheel and source archives as downloadable workflow artifacts. These builds are pilot packages. Customer database reconciliation and real ChatGPT/Gemini onboarding remain deployment acceptance checks.
 
@@ -124,7 +124,7 @@ After selecting an object with saved field remarks, use the guided **Prepare and
 5. In **Participant access and connection**, enter a unique participant name, select published datasets and click **Create participant and activate token**. Copy the token once. Only its SHA-256 hash is stored. Revoke access from the participant table. Both changes take effect immediately and reject stale configuration revisions.
 6. **Test participant access** verifies the token and dataset grant and executes a small bounded query using the same authorization and query path as reporting tools. This is an internal service check, not verification of an external client connection. The MCP HTTP protocol is also covered by automated tests.
 
-Dataset grants allow all rows of the chosen dataset. They are not franchise-specific row security. For an external connection, use the displayed MCP endpoint and a participant bearer token with a compatible MCP client. OAuth/account linking is not implemented in this release. Administrator tokens must never be shared with reporting participants.
+Dataset grants allow all rows of the chosen dataset. They are not franchise-specific row security. For an external connection, use the displayed MCP endpoint and a participant bearer token with a compatible MCP client. OAuth is available when the instance has an explicit HTTPS issuer configured; see the setup below. Administrator tokens must never be shared with reporting participants.
 
 Preparation leaves the published catalog unchanged until the administrator explicitly publishes. Prepared drafts are held in the page; re-prepare from saved remarks after a refresh. The advanced JSON controls remain available.
 
@@ -136,3 +136,40 @@ The guided published-dataset preview uses the first date field (preferring `doc_
 SQL execution has a per-connection `query_timeout_seconds` setting, default 60 seconds and maximum 120. The login timeout stays at 10 seconds. Older saved connections receive the new execution default without losing their field dictionary. Saving SQL details stores a setup draft; publishing activates modified connection settings for reporting.
 
 Private administrator previews now distinguish query timeouts from connectivity problems and may show password-redacted provider diagnostics for otherwise unclassified SQL failures. Participant-facing query failures remain generic. A row limit does not guarantee a fast query when a view must aggregate or join substantial data first; date filters and database-side performance review remain important.
+
+
+## OAuth connections (0.4.0)
+
+Enable OAuth separately for each hosted instance by setting its canonical public HTTPS origin, without a path:
+
+```dotenv
+DEVLENS_OAUTH_ISSUER=https://reports.example.com
+DEVLENS_OAUTH_REDIRECT_HOSTS=chatgpt.com,chat.openai.com,oauth-redirect.googleusercontent.com
+```
+
+Restart the service and deploy the updated Caddy template. OAuth is disabled when `DEVLENS_OAUTH_ISSUER` is unset. Existing bearer-token clients keep working. Each issuer requires its own state directory, service identity and `oauth.sqlite3`. The database is bound to that issuer; changing the issuer while reusing its OAuth database is rejected. Back up the protected database with the instance state, catalog, setup dictionary and SQL password file. Never commit them to Git.
+
+### Connect ChatGPT
+
+1. Publish a reporting dataset and create a participant with explicit dataset grants through the private administration page. Keep the participant token privately; it is displayed only when created.
+2. Add the public `https://reports.example.com/mcp` URL in ChatGPT's custom MCP server dialog. Choose **OAuth** and, if requested, **Dynamic Client Registration (DCR)**. Do not enter the participant token as a client ID or client secret.
+3. When redirected to this instance's **DevLens Reporting** consent page, enter the participant token. Do not enter a SQL password, administrator token, ChatGPT password or Google password.
+4. Review the application, exact return address, participant and permitted datasets. Choose **Allow read-only reporting access**. ChatGPT receives separate OAuth credentials and never receives the participant token through this flow.
+5. Test `list_datasets`, `describe_dataset` and a date-filtered `query_dataset` in the connected account. The protocol tests in this repository do not replace this actual account acceptance check.
+
+This is first-party DevLens participant authentication. It is not Sign in with Google, Microsoft or ChatGPT. Gemini/other clients can use standards-based discovery and DCR with a permitted callback, but product availability and the actual client flow require separate verification.
+
+### Protocol and storage
+
+- Discovery: `/.well-known/oauth-protected-resource/mcp` (also the root alias) and `/.well-known/oauth-authorization-server`.
+- OAuth endpoints: `/register`, `/authorize`, `/token`, `/revoke` and `/oauth/consent`. Only these explicit paths and MCP should be proxied publicly.
+- Authorization code + mandatory S256 PKCE. Authorization codes last two minutes and cannot be exchanged twice. Responses include RFC 9207 `iss`, and the resource is bound to this instance's `/mcp` URL. A different requested resource is rejected.
+- Token endpoint client methods: `none`, `client_secret_post`, `client_secret_basic`. DCR is supported. CIMD and `private_key_jwt` are not advertised in this release.
+- Access tokens last up to one hour. Refresh grants last at most 30 days, without sliding extension. Refresh rotation invalidates the previous access token; reuse of a consumed refresh token revokes its entire grant.
+- Only SHA-256 hashes of high-entropy access/refresh tokens, codes and client secrets are stored. SQLite is owner-only and survives restarts. Participant tokens remain in the published configuration as hashes only.
+- OAuth access is the intersection of datasets consented to and currently granted to the same participant credential. Removing a participant, changing its credential or reducing permissions revokes/shrinks linked grants. Later restoring permissions does not silently expand those grants; reauthorization is required.
+- Private **Refresh OAuth connections** and **Revoke OAuth access** controls manage linked grants. Revoking an OAuth connection does not change the participant's separate direct bearer token. Revoking the participant blocks both paths. Already-running queries may finish after revocation.
+- The consent flow uses Secure/HttpOnly/SameSite cookies, one-use pending requests, origin/CSRF checks, HTML escaping, frame protection, request caps and bounded registration/login rates. No original participant credential is returned in OAuth responses.
+- Callback URIs are registered and matched exactly. Public callbacks must use HTTPS, have an explicitly permitted hostname, and contain no credentials, fragment or reserved OAuth response query fields. Default hostnames are listed above. For a different provider, explicitly approve its callback hostname before connecting. Localhost HTTP callbacks are disabled by default; `DEVLENS_OAUTH_ALLOW_LOOPBACK=1` is an explicit opt-in for trusted local clients.
+
+The implementation reuses the official MCP SDK's authorization, registration and PKCE/token protocol handlers. Production deployments with broader identity requirements can integrate an established identity provider; this pilot does not claim third-party security certification or verified external account identity.

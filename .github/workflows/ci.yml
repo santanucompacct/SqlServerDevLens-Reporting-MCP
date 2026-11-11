@@ -90,4 +90,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: devlens-reporting-setup-preview
-          path: setup-desktop.png
+          path: |
+            setup-desktop.png
+            oauth-*.png

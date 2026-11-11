@@ -19,6 +19,7 @@ from .models import Catalog, Column, Connection, Dataset, Model, Name, Participa
 from .query import compile_query
 from .storage import Store, atomic_write
 from .setup import SetupStore, object_key
+from .oauth import OAuthProvider, SCOPE
 
 log = logging.getLogger("devlens_reporting")
 
@@ -82,6 +83,22 @@ class ParticipantTest(Model):
     token: SecretStr
 
 
+class OAuthGrantRevoke(Model):
+    grant_id: str = Field(pattern=r"^[A-Za-z0-9_-]{20,64}$")
+
+
+class ReportingMCP(FastMCP):
+    oauth_enabled = False
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        if self.oauth_enabled:
+            schemes = [{"type": "oauth2", "scopes": [SCOPE]}]
+            tools = [tool.model_copy(update={"securitySchemes": schemes,
+                     "meta": {**(tool.meta or {}), "securitySchemes": schemes}}) for tool in tools]
+        return tools
+
+
 def create_app(state_path: str | None = None, demo: bool | None = None) -> FastAPI:
     store = Store(Path(state_path or os.environ.get("DEVLENS_STATE", "state/instance.json")))
     password_path = store.path.parent / "sql-password"
@@ -91,22 +108,36 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
     admin_token = os.environ.get("DEVLENS_ADMIN_TOKEN", "")
     if len(admin_token) < 32:
         raise ValueError("DEVLENS_ADMIN_TOKEN must contain at least 32 characters")
+    issuer = os.environ.get("DEVLENS_OAUTH_ISSUER", "").strip()
+    redirect_hosts = os.environ.get("DEVLENS_OAUTH_REDIRECT_HOSTS")
+    oauth = OAuthProvider(store, issuer,
+            redirect_hosts=[host.strip() for host in redirect_hosts.split(",")] if redirect_hosts else None,
+            allow_loopback=os.environ.get("DEVLENS_OAUTH_ALLOW_LOOPBACK") == "1") if issuer else None
     query_slots = anyio.CapacityLimiter(2)
     # Public domains must be explicitly configured for DNS rebinding protection.
     hosts = os.environ.get("DEVLENS_ALLOWED_HOSTS", "127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*").split(",")
-    mcp = FastMCP("DevLens Reporting", stateless_http=True, json_response=True,
+    mcp = ReportingMCP("DevLens Reporting", stateless_http=True, json_response=True,
+                  instructions="Use list_datasets and describe_dataset before querying. Use date filters for dated datasets; ask for a date range if unclear. Do not fetch all history by default. Use server-side group_by and measures for totals, never sum a truncated sample. Respect the documented row grain and business rules; monetary decimals are exact strings.",
                   transport_security=TransportSecuritySettings(
                       enable_dns_rebinding_protection=True, allowed_hosts=hosts,
-                      allowed_origins=[]))
+                      allowed_origins=[oauth.issuer, "https://chatgpt.com", "https://gemini.google.com"] if oauth else []))
+    mcp.oauth_enabled = oauth is not None
 
     def participant(request: Request, state: State) -> Participant:
         supplied = request.headers.get("authorization", "")
-        digest = hashlib.sha256(supplied.removeprefix("Bearer ").encode()).hexdigest()
-        if supplied.startswith("Bearer "):
+        scheme, _, credential = supplied.partition(" ")
+        digest = hashlib.sha256(credential.encode()).hexdigest()
+        if scheme.lower() == "bearer" and credential:
             for user in state.participants:
                 if hmac.compare_digest(digest, user.token_sha256):
                     return user
-        raise HTTPException(401, "Invalid participant token", headers={"WWW-Authenticate": "Bearer"})
+            if oauth:
+                user = oauth.resolve_participant(credential)
+                if user:
+                    return user
+        challenge = (f'Bearer resource_metadata="{oauth.issuer}/.well-known/oauth-protected-resource/mcp", scope="{SCOPE}"'
+                     if oauth else "Bearer")
+        raise HTTPException(401, "Invalid participant token", headers={"WWW-Authenticate": challenge})
 
     def current_context():
         context = mcp.get_context()
@@ -173,10 +204,17 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
             yield
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    oauth_cors_paths = {"/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource",
+                        "/.well-known/oauth-protected-resource/mcp", "/token", "/register", "/revoke"}
 
     @app.middleware("http")
     async def access(request: Request, call_next):
         path = request.url.path
+        if oauth and path in oauth_cors_paths and request.method == "OPTIONS":
+            return JSONResponse({}, headers={"Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Authorization, Content-Type, MCP-Protocol-Version",
+                "Cache-Control": "no-store"})
         if path.startswith("/admin/api"):
             token = request.headers.get("authorization", "")
             if not hmac.compare_digest(token, "Bearer " + admin_token):
@@ -193,6 +231,10 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
+        if oauth and path in oauth_cors_paths:
+            response.headers["Access-Control-Allow-Origin"] = "*"
+        if oauth and (path in oauth_cors_paths or path.startswith("/oauth/") or path == "/authorize"):
+            response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
     @app.get("/health")
@@ -213,6 +255,21 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
                 "setup": setup.configuration(state.connection),
                 "mcp_url": endpoint,
                 "password_saved": password_path.exists() or bool(os.environ.get(state.connection.password_env))}
+
+    @app.get("/admin/api/oauth")
+    def oauth_status():
+        if not oauth:
+            return {"enabled": False, "grants": []}
+        return {"enabled": True, "issuer": oauth.issuer, "resource": oauth.resource,
+                "registration": "Dynamic client registration (DCR)", "scope": SCOPE,
+                "access_token_seconds": 3600, "refresh_grant_days": 30, "grants": oauth.list_grants()}
+
+    @app.post("/admin/api/oauth/revoke")
+    def oauth_revoke(body: OAuthGrantRevoke):
+        if not oauth:
+            raise HTTPException(400, "OAuth is not enabled for this instance")
+        oauth.revoke_grant(body.grant_id)
+        return {"status": "revoked"}
 
     @app.post("/admin/api/connection")
     def save_connection(body: ConnectionSave):
@@ -333,6 +390,8 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         state.participants = [user for user in state.participants if user.name != body.name]
         try:
             revision = store.publish(state, revision)
+            if oauth:
+                oauth.reconcile(state)
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
         return {"status": "revoked", "revision": revision}
@@ -373,6 +432,8 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
         try:
             await run_in_threadpool(database.validate, body.state.connection, body.state.catalog)
             revision = store.publish(body.state, body.revision)
+            if oauth:
+                oauth.reconcile(body.state)
             return {"status": "published", "revision": revision}
         except ValueError as error:
             raise HTTPException(409, str(error)) from None
@@ -390,6 +451,8 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
             raise HTTPException(400, str(error)) from None
 
     app.add_middleware(RequestSizeLimit)
+    if oauth:
+        app.router.routes.extend(oauth.routes())
     app.mount("/", mcp.streamable_http_app())
     return app
 

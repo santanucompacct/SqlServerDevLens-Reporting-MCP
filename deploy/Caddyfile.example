@@ -1,6 +1,6 @@
 reports.example.com {
-    @mcp path /mcp /mcp/*
-    handle @mcp {
+    @reporting path /mcp /mcp/* /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource /.well-known/oauth-protected-resource/mcp /authorize /token /register /revoke /oauth/consent
+    handle @reporting {
         reverse_proxy 127.0.0.1:8101
     }
     handle {

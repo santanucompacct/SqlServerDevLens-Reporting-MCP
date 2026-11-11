@@ -10,3 +10,7 @@ state/
 
 # Instance-local SQL credential file
 sql-password
+
+# Private OAuth state and SQLite transaction files
+*.sqlite3
+*.sqlite3-*

@@ -186,3 +186,89 @@ def test_guided_publishing_and_participant_ui(tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+def test_oauth_consent_and_admin_session_revocation(tmp_path):
+    """Use an intercepted HTTPS origin to exercise Secure cookies without a test CA."""
+    import base64
+    import hashlib
+    import json
+    import secrets
+    from urllib.parse import parse_qs, urlencode, urlsplit
+    from playwright.sync_api import sync_playwright
+    state = tmp_path / 'instance.json'
+    value = json.loads(Path('examples/instance.json').read_text())
+    participant_token = 'synthetic-browser-participant-12345678901234567890'
+    value['participants'] = [{'name': 'oauth_tester', 'token_sha256': hashlib.sha256(participant_token.encode()).hexdigest(), 'datasets': ['sales']}]
+    state.write_text(json.dumps(value))
+    admin_token = 'synthetic-browser-oauth-admin-123456789012345'
+    issuer, local, redirect = 'https://reporting.test', 'http://127.0.0.1:8131', 'https://chatgpt.com/connector_platform_oauth_redirect'
+    environment = {**os.environ, 'DEVLENS_STATE': str(state), 'DEVLENS_DEMO': '1', 'DEVLENS_PORT': '8131',
+                   'DEVLENS_ADMIN_TOKEN': admin_token, 'DEVLENS_OAUTH_ISSUER': issuer,
+                   'DEVLENS_ALLOWED_HOSTS': 'reporting.test,localhost,127.0.0.1:*'}
+    process = subprocess.Popen(['devlens-reporting'], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        with httpx.Client(base_url=local, trust_env=False) as api:
+            for _ in range(100):
+                try:
+                    if api.get('/health').status_code == 200:
+                        break
+                except httpx.ConnectError:
+                    pass
+                time.sleep(.1)
+            registration = api.post('/register', json={'redirect_uris': [redirect], 'token_endpoint_auth_method': 'none', 'client_name': 'Browser OAuth test'}).json()
+            verifier = secrets.token_urlsafe(48)
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
+            params = {'client_id': registration['client_id'], 'redirect_uri': redirect, 'response_type': 'code',
+                      'scope': 'reporting:read', 'code_challenge': challenge, 'code_challenge_method': 'S256',
+                      'state': 'browser-state', 'resource': issuer + '/mcp'}
+            with sync_playwright() as driver:
+                browser = driver.chromium.launch(executable_path=os.environ.get('DEVLENS_CHROMIUM'))
+                page = browser.new_page()
+                errors, callbacks = [], []
+                page.on('pageerror', lambda error: errors.append(str(error)))
+                def proxy(route):
+                    upstream = local + urlsplit(route.request.url).path
+                    if urlsplit(route.request.url).query:
+                        upstream += '?' + urlsplit(route.request.url).query
+                    response = route.fetch(url=upstream, max_redirects=0)
+                    route.fulfill(response=response)
+                page.route(issuer + '/**', proxy)
+                def callback(route):
+                    callbacks.append(route.request.url)
+                    route.fulfill(status=200, content_type='text/html', body='<p>OAuth callback received</p>')
+                page.route(redirect + '**', callback)
+                page.goto(issuer + '/authorize?' + urlencode(params))
+                page.get_by_label('Participant token', exact=True).fill(participant_token)
+                page.get_by_role('button', name='Continue', exact=True).click()
+                page.get_by_role('heading', name='Review reporting access').wait_for()
+                assert 'sales' in page.locator('main').text_content()
+                assert participant_token not in page.content()
+                screenshot_dir = Path(os.environ.get('DEVLENS_SCREENSHOT', str(tmp_path / 'setup-desktop.png'))).parent
+                page.screenshot(path=str(screenshot_dir / 'oauth-consent.png'), full_page=True)
+                page.set_viewport_size({'width': 390, 'height': 844})
+                assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+                page.get_by_role('button', name='Allow read-only reporting access').click()
+                page.wait_for_url(redirect + '**')
+                callback_params = parse_qs(urlsplit(callbacks[-1]).query)
+                assert callback_params['iss'] == [issuer] and callback_params['state'] == ['browser-state']
+                tokens = api.post('/token', data={'grant_type': 'authorization_code', 'client_id': registration['client_id'],
+                    'redirect_uri': redirect, 'code_verifier': verifier, 'code': callback_params['code'][0], 'resource': issuer + '/mcp'}).json()
+                assert 'access_token' in tokens
+                page.goto(local + '/admin')
+                page.locator('#token').fill(admin_token)
+                page.locator('#load').click()
+                page.wait_for_function("document.querySelector('#status').textContent === 'Loaded synthetic demo configuration'")
+                assert 'OAuth is enabled' in page.locator('#oauth_status').text_content()
+                assert page.locator('#oauth_grants tr').count() == 1
+                assert 'oauth_tester' in page.locator('#oauth_grants').text_content()
+                page.on('dialog', lambda dialog: dialog.accept())
+                page.get_by_role('button', name='Revoke OAuth access').click()
+                page.wait_for_function("document.querySelector('#status').textContent === 'OAuth connection revoked'")
+                denied = api.post('/mcp', headers={'Authorization': 'Bearer ' + tokens['access_token']}, json={})
+                assert denied.status_code == 401
+                assert not errors
+                browser.close()
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
