@@ -43,22 +43,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Bound system dependency downloads
+      - name: Use the official ODBC driver bundled with the SQL Server image
+        env:
+          SQL_CONTAINER: ${{ job.services.sqlserver.id }}
+        shell: bash
         run: |
-          printf '%s\n' 'Acquire::ForceIPv4 "true";' 'Acquire::Retries "1";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/80-devlens-ci >/dev/null
-      - name: Install SQL Server ODBC driver
-        run: |
-          curl --connect-timeout 15 --max-time 90 --retry 2 -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/microsoft-prod.deb
-          sudo dpkg -i /tmp/microsoft-prod.deb
-          # The Azure HTTP Ubuntu mirror can stall on hosted runners.
-          # Refresh indexes from the official HTTPS archive before installing dependencies.
-          for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do
-            if [[ -f "$source_file" ]]; then
-              sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g;s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' "$source_file"
-            fi
+          set -euo pipefail
+          sql_driver_dir="$RUNNER_TEMP/devlens-odbc"
+          mkdir -p "$sql_driver_dir/lib" "$sql_driver_dir/config"
+          docker cp "$SQL_CONTAINER:/opt/microsoft/msodbcsql18" "$sql_driver_dir/msodbcsql18"
+          for library in libodbc.so.2 libodbcinst.so.2 libltdl.so.7; do
+            docker cp -L "$SQL_CONTAINER:/usr/lib/x86_64-linux-gnu/$library" "$sql_driver_dir/lib/$library"
           done
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+          driver_file=$(find "$sql_driver_dir/msodbcsql18/lib64" -name 'libmsodbcsql-18*.so*' -type f -print -quit)
+          test -n "$driver_file"
+          printf '[ODBC Driver 18 for SQL Server]\nDriver=%s\nUsageCount=1\n' "$driver_file" > "$sql_driver_dir/config/odbcinst.ini"
+          printf 'ODBCSYSINI=%s\n' "$sql_driver_dir/config" >> "$GITHUB_ENV"
+          printf 'LD_LIBRARY_PATH=%s%s\n' "$sql_driver_dir/lib" "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - run: python -m pip install '.[test]'
       - run: python -m pytest tests/test_sqlserver.py -q
   browser:
