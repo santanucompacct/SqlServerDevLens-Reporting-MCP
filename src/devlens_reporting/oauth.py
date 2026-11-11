@@ -9,6 +9,7 @@ import hmac
 import html
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -324,13 +325,19 @@ class OAuthProvider:
                 else:
                     db.execute("UPDATE grants SET datasets=? WHERE id=?", (json.dumps(permitted), grant["id"]))
 
-    def page(self, request_id, message="", status=200):
+    def cookie_name(self, request_id):
+        # Separate browser proofs for simultaneous tabs and client retries.
+        return COOKIE + "-" + digest(request_id)[:24]
+
+    def page(self, request_id, message="", status=200, existing_csrf=""):
         with self.db() as db:
             row = db.execute("SELECT * FROM pending WHERE id=? AND expires>? AND attempts<5",
                              (request_id, time.time())).fetchone()
             if not row:
                 return HTMLResponse("Authorization request expired. Return to your client and connect again.", status_code=400)
-            csrf = secrets.token_urlsafe(32)
+            # Reloading a page must not invalidate its already rendered form.
+            csrf = existing_csrf if (existing_csrf and hmac.compare_digest(
+                digest(existing_csrf), row["csrf_hash"] or "")) else secrets.token_urlsafe(32)
             db.execute("UPDATE pending SET csrf_hash=? WHERE id=?", (digest(csrf), request_id))
             client = db.execute("SELECT metadata FROM clients WHERE id=?", (row["client_id"],)).fetchone()
         esc = html.escape
@@ -362,14 +369,15 @@ class OAuthProvider:
             "Cache-Control": "no-store", "Pragma": "no-cache", "Referrer-Policy": "same-origin",
             "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"})
-        response.set_cookie(COOKIE, csrf, secure=True, httponly=True, samesite="lax", max_age=600, path="/")
+        response.set_cookie(self.cookie_name(request_id), csrf, secure=True, httponly=True, samesite="lax", max_age=600, path="/")
         return response
 
     async def consent(self, request: Request):
         if request.method == "GET":
             if not self.rate_allowed("consent_page", 120, request):
                 return oauth_error("temporarily_unavailable", "Try again in a minute", 429)
-            return self.page(request.query_params.get("request", ""))
+            request_id = request.query_params.get("request", "")
+            return self.page(request_id, existing_csrf=request.cookies.get(self.cookie_name(request_id), ""))
         if not self.rate_allowed("consent_submit", 60, request):
             return oauth_error("temporarily_unavailable", "Try again in a minute", 429)
         if request.headers.get("origin") not in {None, self.issuer}:
@@ -379,9 +387,15 @@ class OAuthProvider:
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM pending WHERE id=? AND expires>? AND attempts<5", (request_id, time.time())).fetchone()
-            if (not row or not csrf or not hmac.compare_digest(digest(csrf), row["csrf_hash"] or "")
-                    or not hmac.compare_digest(csrf.encode(), request.cookies.get(COOKIE, "").encode())):
-                return oauth_error("access_denied", "Consent verification failed; restart sign-in", 403)
+            cookie = request.cookies.get(self.cookie_name(request_id), "")
+            reason = ("request_expired_or_used" if not row else
+                      "csrf_mismatch" if not csrf or not hmac.compare_digest(digest(csrf), row["csrf_hash"] or "") else
+                      "cookie_missing" if not cookie else
+                      "cookie_mismatch" if not hmac.compare_digest(csrf.encode(), cookie.encode()) else None)
+            if reason:
+                # Log only a category, never credentials or form identifiers.
+                logging.getLogger(__name__).warning("OAuth consent rejected: %s", reason)
+                return oauth_error("access_denied", "Consent verification failed; restart sign-in (" + reason + ")", 403)
             params = AuthorizationParams.model_validate_json(row["params"])
             action = form.get("action")
             if action == "deny":
@@ -417,9 +431,9 @@ class OAuthProvider:
             else:
                 return oauth_error("invalid_request", "Invalid consent action")
         if redirect is None:
-            return self.page(request_id, message, status=401 if message else 200)
+            return self.page(request_id, message, status=401 if message else 200, existing_csrf=csrf)
         response = RedirectResponse(redirect, status_code=302, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
-        response.delete_cookie(COOKIE, secure=True, httponly=True, samesite="lax", path="/")
+        response.delete_cookie(self.cookie_name(request_id), secure=True, httponly=True, samesite="lax", path="/")
         return response
 
     def metadata(self):

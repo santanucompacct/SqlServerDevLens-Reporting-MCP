@@ -79,7 +79,7 @@ def login(client, page, token=PARTICIPANT):
 
 def authorize(client, registration):
     verifier, page = begin(client, registration)
-    assert page.cookies.get(COOKIE)
+    assert any(key.startswith(COOKIE + "-") for key in page.cookies)
     assert 'Secure' in page.headers['set-cookie'] and 'HttpOnly' in page.headers['set-cookie']
     assert page.headers['referrer-policy'] == 'same-origin'
     page = login(client, page)
@@ -325,3 +325,29 @@ def test_expired_code_and_grant_and_cross_client_revocation(client, configured):
     assert rpc(client, tokens['access_token'], 'tools/list').status_code == 401
     refreshed = client.post('/token', data={'client_id': registration['client_id'], 'grant_type': 'refresh_token', 'refresh_token': tokens['refresh_token']})
     assert refreshed.status_code == 400
+
+
+def test_parallel_signins_and_reloads_do_not_invalidate_forms(client):
+    registration = register(client)
+    _, first = begin(client, registration)
+    first_values = form_values(first)
+    _, second = begin(client, registration)
+    assert first_values['csrf'] != form_values(second)['csrf']
+    review = login(client, first)
+    assert review.status_code == 200
+    assert form_values(review)['csrf'] == first_values['csrf']
+    reload_page = client.get('/oauth/consent', params={'request': first_values['request']})
+    assert form_values(reload_page)['csrf'] == first_values['csrf']
+    approved = client.post('/oauth/consent', headers={'Origin': ISSUER},
+        data={**first_values, 'action': 'approve'}, follow_redirects=False)
+    assert approved.status_code == 302
+    assert login(client, second).status_code == 200
+
+
+def test_missing_browser_cookie_still_blocks_consent(client):
+    registration = register(client)
+    _, page = begin(client, registration)
+    client.cookies.clear()
+    rejected = login(client, page)
+    assert rejected.status_code == 403
+    assert 'cookie_missing' in rejected.json()['error_description']
