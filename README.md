@@ -2,7 +2,7 @@
 
 An MIT-licensed, catalog-driven reporting service for SQL Server. Authorized AI clients discover approved datasets, read their business dictionary, and request bounded, parameterized SELECT queries. A private administration webpage manages the connection, published catalog and participant grants.
 
-**Version 0.1.0 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
+**Version 0.1.1 is an initial implementation for pilot evaluation.** It uses Python 3.12, FastAPI, the official MCP Python SDK and Microsoft ODBC Driver 18. It is a standalone service alongside [SQL Server DevLens MCP](https://github.com/santanucompacct/SqlServerDevLens-MCP). SQL Server remains responsible for query execution.
 
 ## Included in this version
 
@@ -56,7 +56,7 @@ MCP `query_dataset` takes this object under the argument `query`. Detail queries
 
 ## Connect a real SQL Server
 
-Install [Microsoft ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server) on the Linux host. Disable demo mode by removing `DEVLENS_DEMO` from the environment. Configure the SQL hostname, port, database, SQL username and password environment-variable name through `/admin`. Set that password in the service's protected environment file and restart the service to load it.
+Install [Microsoft ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server) on the Linux host. Disable demo mode by removing `DEVLENS_DEMO` from the environment. Configure the SQL hostname, port, database, SQL username and password environment-variable name through `/admin`. Enter the actual password in the separate **SQL password** field and click **Save SQL password**, then test the connection. Special characters, spaces and Unicode are supported. Saving immediately replaces this instance's active password. The password is stored in a separate mode-0600 `sql-password` file beside the state manifest and is read on each connection. Include that protected file in deployment backups. It takes precedence over the environment fallback. Existing `DEVLENS_SQL_PASSWORD` configurations continue to work when a saved password file is absent. The advanced password environment field contains a variable name such as `DEVLENS_SQL_PASSWORD`.
 
 TLS encryption and server certificate verification are enabled. Use a hostname matching the SQL certificate and a trusted issuing CA. `ApplicationIntent=ReadOnly` is a connection preference. Enforce permissions with a dedicated SQL principal granted SELECT only on approved reporting objects. Avoid db_owner, db_datareader and inherited broad grants. Configure and verify that SQL identity separately through your database administration process.
 
