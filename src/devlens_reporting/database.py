@@ -151,5 +151,14 @@ def connection_error_message(error: Exception, stage: str = "connection") -> str
     if state == "IM002":
         return "Microsoft ODBC Driver 18 for SQL Server is unavailable on the reporting host."
     if stage == "metadata":
-        return "SQL connection opened, but metadata inspection failed. Check object visibility and SELECT permissions."
+        error_type = type(error).__name__
+        allowed_types = {"Exception", "Error", "ProgrammingError", "OperationalError", "InterfaceError",
+                         "DatabaseError", "DataError", "NotSupportedError", "TypeError", "AttributeError",
+                         "RuntimeError", "PermissionError", "UnicodeDecodeError", "IndexError", "KeyError"}
+        if error_type not in allowed_types:
+            error_type = "Error"
+        sqlstate = state if re.fullmatch(r"[A-Z0-9]{5}", state) else "unavailable"
+        return ("SQL connection opened, but metadata inspection failed. "
+                f"Diagnostic {error_type} / SQLSTATE {sqlstate}. "
+                "Share this diagnostic code with the administrator.")
     return "SQL connection failed. Check authentication, database access, network connectivity and TLS settings."
