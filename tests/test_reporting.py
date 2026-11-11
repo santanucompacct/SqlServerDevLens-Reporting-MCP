@@ -278,3 +278,17 @@ def test_connection_error_is_actionable_and_redacted(client, monkeypatch):
     assert result.status_code == 400
     assert "certificate validation failed" in result.json()["detail"]
     assert "do-not-return" not in result.text
+
+
+def test_metadata_diagnostic_identifies_failure_without_provider_secrets(client, monkeypatch):
+    from devlens_reporting.database import Database
+    class ProgrammingError(Exception):
+        pass
+    def fail(self, settings):
+        raise ProgrammingError("42S22", "Invalid column on private-host; password=never-return")
+    monkeypatch.setattr(Database, "objects", fail)
+    result = client.post("/admin/api/test", headers=headers(), json={"connection": {}})
+    assert result.status_code == 400
+    assert "ProgrammingError / SQLSTATE 42S22" in result.json()["detail"]
+    assert "never-return" not in result.text
+    assert "private-host" not in result.text
