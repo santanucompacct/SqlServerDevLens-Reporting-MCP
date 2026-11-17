@@ -243,12 +243,14 @@ async function refreshOAuth() {
     const result = await api('oauth');
     const rows = byId('oauth_grants'); rows.replaceChildren();
     byId('oauth_status').textContent = result.enabled
-        ? 'OAuth is enabled for ' + result.issuer + '. Access tokens last one hour; refresh grants last at most 30 days.'
+        ? 'OAuth is enabled for ' + result.issuer + '. Access tokens last one hour; ' + (result.refresh_grant_days === 0
+            ? 'connection authorization has no fixed expiry and can be revoked at any time.'
+            : 'new refresh grants last at most ' + result.refresh_grant_days + ' days.')
         : 'OAuth is not enabled on this server. Ask the administrator to configure the public issuer URL.';
     for (const grant of result.grants) {
         const row = document.createElement('tr');
         for (const value of [grant.participant, grant.client_name, grant.datasets.join(', '),
-                new Date(grant.expires * 1000).toLocaleString(), grant.active ? 'Active' : 'Revoked or inactive']) {
+                grant.no_fixed_expiry ? 'No fixed expiry' : new Date(grant.expires * 1000).toLocaleString(), grant.active ? 'Active' : 'Revoked or inactive']) {
             const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
         }
         const cell = document.createElement('td'), button = document.createElement('button');

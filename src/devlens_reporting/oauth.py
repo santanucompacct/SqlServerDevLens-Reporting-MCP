@@ -37,6 +37,7 @@ from .models import Participant
 SCOPE = "reporting:read"
 ACCESS_SECONDS = 3600
 GRANT_SECONDS = 30 * 86400
+NO_FIXED_EXPIRY = 253402300799  # Year 9999 sentinel; rendered as no fixed expiry.
 COOKIE = "__Host-devlens-oauth"
 DEFAULT_REDIRECT_HOSTS = {"chatgpt.com", "chat.openai.com", "oauth-redirect.googleusercontent.com"}
 
@@ -69,7 +70,10 @@ class SQLiteTransaction:
 
 
 class OAuthProvider:
-    def __init__(self, store, issuer: str, redirect_hosts=None, allow_loopback=False):
+    def __init__(self, store, issuer: str, redirect_hosts=None, allow_loopback=False, grant_days=30):
+        if isinstance(grant_days, bool) or not isinstance(grant_days, int) or not 0 <= grant_days <= 3650:
+            raise ValueError("OAuth grant days must be an integer from 0 to 3650; 0 means no fixed expiry")
+        self.grant_days = grant_days
         parsed = urlsplit(issuer)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.path not in {"", "/"}
                 or parsed.query or parsed.fragment or parsed.username or parsed.password):
@@ -114,6 +118,29 @@ class OAuthProvider:
             if stored and stored["value"] != self.issuer:
                 raise ValueError("OAuth database belongs to another issuer; review the instance configuration")
             db.execute("INSERT OR IGNORE INTO settings VALUES ('issuer',?)", (self.issuer,))
+        if self.grant_days == 0:
+            self.extend_active_connections()
+
+    def extend_active_connections(self):
+        """Apply an explicit no-expiry policy without reviving expired/revoked grants.
+
+        Preserve the client, participant fingerprint, consented datasets and token
+        hashes. Access tokens and authorization codes keep their short deadlines.
+        """
+        now = time.time()
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute("""SELECT g.*, g.expires AS grant_expires FROM grants g
+                WHERE g.revoked=0 AND g.expires>? AND EXISTS
+                (SELECT 1 FROM tokens t WHERE t.grant_id=g.id AND t.kind='refresh'
+                 AND t.used=0 AND t.expires>?)""", (now, now)).fetchall()
+            for row in rows:
+                if self.grant_user(row):
+                    db.execute("UPDATE grants SET expires=? WHERE id=?", (NO_FIXED_EXPIRY, row["id"]))
+                    # Retain consumed-token history for replay detection too.
+                    db.execute("UPDATE tokens SET expires=? WHERE grant_id=? AND kind='refresh'",
+                               (NO_FIXED_EXPIRY, row["id"]))
+
 
     def db(self):
         return SQLiteTransaction(self.path)
@@ -306,7 +333,7 @@ class OAuthProvider:
         return [{"id": row["id"], "participant": row["participant"],
                  "client_name": json.loads(row["metadata"]).get("client_name") or "OAuth client",
                  "datasets": json.loads(row["datasets"]), "created": row["created"], "expires": row["expires"],
-                 "active": bool(self.grant_user(row))} for row in rows]
+                 "no_fixed_expiry": row["expires"] == NO_FIXED_EXPIRY, "active": bool(self.grant_user(row))} for row in rows]
 
     def revoke_grant(self, grant_id):
         with self.db() as db:
@@ -353,6 +380,8 @@ class OAuthProvider:
                     "Your SQL password, administrator token and ChatGPT password are not accepted here.</p>"
                     "<label>Participant token<input name='participant_token' type='password' autocomplete='off' required maxlength='512'></label>"
                     "<button name='action' value='login'>Continue</button>")
+        lifetime = ("This connection has no fixed expiry and remains authorized until revoked." if self.grant_days == 0
+                    else "A refresh grant lasts at most " + str(self.grant_days) + " days.")
         document = ("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
                     "<title>DevLens Reporting authorization</title><style>body{font:16px system-ui;background:#f3f6fa;color:#172b43;max-width:650px;margin:40px auto;padding:20px}"
                     "main{background:white;padding:28px;border-radius:12px;border:1px solid #dce5ef}p{line-height:1.6;overflow-wrap:anywhere}input,button{font:inherit;padding:12px;box-sizing:border-box}"
@@ -363,7 +392,7 @@ class OAuthProvider:
                     "<form method='post' action='/oauth/consent'><input type='hidden' name='request' value='" + esc(request_id) +
                     "'><input type='hidden' name='csrf' value='" + esc(csrf) + "'>" + body +
                     "<button name='action' value='deny' formnovalidate>Deny</button></form>"
-                    "<p><small>Access tokens expire after one hour. A refresh grant lasts at most 30 days and can be revoked by your administrator."
+                    "<p><small>Access tokens expire after one hour. " + lifetime + " Your administrator can revoke access at any time."
                     " Your participant token is not passed to the connecting application.</small></p></main></body></html>")
         # Chrome applies form-action to redirects after form submission too.
         # Permit only self and this request's already validated callback origin.
@@ -427,7 +456,7 @@ class OAuthProvider:
                 grant_id, code = secrets.token_urlsafe(24), secrets.token_urlsafe(32)
                 now = time.time()
                 db.execute("INSERT INTO grants (id,client_id,participant,fingerprint,datasets,created,expires) VALUES (?,?,?,?,?,?,?)",
-                           (grant_id, row["client_id"], user.name, user.token_sha256, json.dumps(user.datasets), now, now + GRANT_SECONDS))
+                           (grant_id, row["client_id"], user.name, user.token_sha256, json.dumps(user.datasets), now, NO_FIXED_EXPIRY if self.grant_days == 0 else now + self.grant_days * 86400))
                 db.execute("INSERT INTO tokens (hash,kind,grant_id,expires,data) VALUES (?,'code',?,?,?)",
                            (digest(code), grant_id, now + 120, row["params"]))
                 db.execute("DELETE FROM pending WHERE id=?", (request_id,))

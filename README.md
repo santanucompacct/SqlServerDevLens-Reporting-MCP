@@ -173,3 +173,10 @@ This is first-party DevLens participant authentication. It is not Sign in with G
 - Callback URIs are registered and matched exactly. Public callbacks must use HTTPS, have an explicitly permitted hostname, and contain no credentials, fragment or reserved OAuth response query fields. Default hostnames are listed above. For a different provider, explicitly approve its callback hostname before connecting. Localhost HTTP callbacks are disabled by default; `DEVLENS_OAUTH_ALLOW_LOOPBACK=1` is an explicit opt-in for trusted local clients.
 
 The implementation reuses the official MCP SDK's authorization, registration and PKCE/token protocol handlers. Production deployments with broader identity requirements can integrate an established identity provider; this pilot does not claim third-party security certification or verified external account identity.
+
+
+### Optional long-lived company connections
+
+Set `DEVLENS_OAUTH_GRANT_DAYS=0` on an instance to remove its fixed OAuth grant expiry. The default remains 30 days; values 1–3650 configure new grant lifetimes in days. Access tokens still expire after one hour, refresh tokens rotate, and replay/participant/session revocation checks remain enabled.
+
+On startup with the explicit zero setting, existing unexpired, unrevoked connections with a valid participant and active refresh token are extended without reauthentication or additional dataset permissions. Expired/revoked grants are not restored. Admin and consent pages display the effective policy. Zero is implemented as a year-9999 internal timestamp, presented as “No fixed expiry.” Setting a finite policy later affects new grants; revoke existing unlimited connections explicitly if they should expire sooner. Client-side removal or refresh failures can still require reconnection.

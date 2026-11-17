@@ -352,3 +352,70 @@ def test_missing_browser_cookie_still_blocks_consent(client):
     rejected = login(client, page)
     assert rejected.status_code == 403
     assert 'cookie_missing' in rejected.json()['error_description']
+
+
+def test_no_fixed_expiry_extends_existing_connection_without_new_login(client, configured, monkeypatch):
+    from devlens_reporting.oauth import NO_FIXED_EXPIRY
+    registration = register(client)
+    code, verifier = authorize(client, registration)
+    tokens = exchange(client, registration, code, verifier).json()
+    before = client.get('/admin/api/oauth', headers=admin()).json()['grants'][0]
+    assert not before['no_fixed_expiry']
+    monkeypatch.setenv('DEVLENS_OAUTH_GRANT_DAYS', '0')
+    with TestClient(create_app(str(configured), demo=True), base_url=ISSUER) as restarted:
+        status = restarted.get('/admin/api/oauth', headers=admin()).json()
+        assert status['refresh_grant_days'] == 0
+        grant = status['grants'][0]
+        assert grant['id'] == before['id'] and grant['datasets'] == before['datasets']
+        assert grant['no_fixed_expiry'] and grant['expires'] == NO_FIXED_EXPIRY
+        assert rpc(restarted, tokens['access_token'], 'tools/list').status_code == 200
+        future = time.time() + 366 * 86400
+        monkeypatch.setattr(time, 'time', lambda: future)
+        assert rpc(restarted, tokens['access_token'], 'tools/list').status_code == 401
+        renewed = restarted.post('/token', data={'grant_type': 'refresh_token', 'client_id': registration['client_id'],
+            'refresh_token': tokens['refresh_token'], 'resource': ISSUER + '/mcp'})
+        assert renewed.status_code == 200
+        replacement = renewed.json()
+        assert 0 < replacement['expires_in'] <= 3600
+        assert rpc(restarted, replacement['access_token'], 'tools/list').status_code == 200
+        replay = restarted.post('/token', data={'grant_type': 'refresh_token', 'client_id': registration['client_id'],
+            'refresh_token': tokens['refresh_token'], 'resource': ISSUER + '/mcp'})
+        assert replay.status_code == 400
+        assert rpc(restarted, replacement['access_token'], 'tools/list').status_code == 401
+
+
+def test_no_expiry_does_not_revive_expired_or_revoked_connections(client, configured, monkeypatch):
+    for kind in ['expired', 'revoked']:
+        registration = register(client)
+        code, verifier = authorize(client, registration)
+        exchange(client, registration, code, verifier)
+        with sqlite3.connect(configured.parent / 'oauth.sqlite3') as db:
+            if kind == 'expired':
+                db.execute('UPDATE grants SET expires=? WHERE client_id=?', (time.time() - 1, registration['client_id']))
+            else:
+                db.execute('UPDATE grants SET revoked=1 WHERE client_id=?', (registration['client_id'],))
+    monkeypatch.setenv('DEVLENS_OAUTH_GRANT_DAYS', '0')
+    with TestClient(create_app(str(configured), demo=True), base_url=ISSUER) as restarted:
+        assert not any(g['active'] for g in restarted.get('/admin/api/oauth', headers=admin()).json()['grants'])
+
+
+def test_new_no_expiry_consent_and_revocation(configured, monkeypatch):
+    monkeypatch.setenv('DEVLENS_OAUTH_GRANT_DAYS', '0')
+    with TestClient(create_app(str(configured), demo=True), base_url=ISSUER) as client:
+        registration = register(client)
+        verifier, page = begin(client, registration)
+        assert 'no fixed expiry' in page.text
+        page = login(client, page)
+        approved = client.post('/oauth/consent', data={**form_values(page), 'action': 'approve'}, headers={'Origin': ISSUER}, follow_redirects=False)
+        code = parse_qs(urlsplit(approved.headers['location']).query)['code'][0]
+        token = exchange(client, registration, code, verifier).json()['access_token']
+        grant = client.get('/admin/api/oauth', headers=admin()).json()['grants'][0]
+        assert grant['no_fixed_expiry']
+        client.post('/admin/api/oauth/revoke', headers=admin(), json={'grant_id': grant['id']})
+        assert rpc(client, token, 'tools/list').status_code == 401
+
+
+@pytest.mark.parametrize('days', [-1, 3651, True, 'unlimited'])
+def test_invalid_grant_lifetime_rejected(configured, days):
+    with pytest.raises(ValueError):
+        OAuthProvider(Store(configured), ISSUER, grant_days=days)

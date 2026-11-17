@@ -112,7 +112,8 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
     redirect_hosts = os.environ.get("DEVLENS_OAUTH_REDIRECT_HOSTS")
     oauth = OAuthProvider(store, issuer,
             redirect_hosts=[host.strip() for host in redirect_hosts.split(",")] if redirect_hosts else None,
-            allow_loopback=os.environ.get("DEVLENS_OAUTH_ALLOW_LOOPBACK") == "1") if issuer else None
+            allow_loopback=os.environ.get("DEVLENS_OAUTH_ALLOW_LOOPBACK") == "1",
+            grant_days=int(os.environ.get("DEVLENS_OAUTH_GRANT_DAYS", "30"))) if issuer else None
     query_slots = anyio.CapacityLimiter(2)
     # Public domains must be explicitly configured for DNS rebinding protection.
     hosts = os.environ.get("DEVLENS_ALLOWED_HOSTS", "127.0.0.1,127.0.0.1:*,localhost,localhost:*,[::1],[::1]:*").split(",")
@@ -262,7 +263,7 @@ def create_app(state_path: str | None = None, demo: bool | None = None) -> FastA
             return {"enabled": False, "grants": []}
         return {"enabled": True, "issuer": oauth.issuer, "resource": oauth.resource,
                 "registration": "Dynamic client registration (DCR)", "scope": SCOPE,
-                "access_token_seconds": 3600, "refresh_grant_days": 30, "grants": oauth.list_grants()}
+                "access_token_seconds": 3600, "refresh_grant_days": oauth.grant_days, "grants": oauth.list_grants()}
 
     @app.post("/admin/api/oauth/revoke")
     def oauth_revoke(body: OAuthGrantRevoke):
