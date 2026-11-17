@@ -14,3 +14,5 @@ sql-password
 # Private OAuth state and SQLite transaction files
 *.sqlite3
 *.sqlite3-*
+
+.devlens-import-backups/

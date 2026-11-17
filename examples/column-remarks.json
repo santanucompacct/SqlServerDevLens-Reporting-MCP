@@ -1,0 +1,20 @@
+{
+  "columns": [
+    {
+      "name": "customer",
+      "remarks": "Synthetic customer label."
+    },
+    {
+      "name": "doc_date",
+      "remarks": "Transaction date for reporting filters."
+    },
+    {
+      "name": "amount",
+      "remarks": "Synthetic transaction amount."
+    },
+    {
+      "name": "branch",
+      "remarks": "Synthetic branch label."
+    }
+  ]
+}
